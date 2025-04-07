@@ -1,0 +1,1 @@
+int mcp_serve();

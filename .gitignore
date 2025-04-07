@@ -1,0 +1,54 @@
+# C++ 编译生成的文件
+*.o
+*.obj
+*.exe
+*.out
+*.a
+*.so
+*.dll
+*.dylib
+*.lib
+
+# CMake 生成的文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.dir/
+
+# Visual Studio / Visual Studio Code 文件
+.vs/
+.vscode/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+ipch/
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.VC.db
+*.VC.opendb
+Debug/
+Release/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+
+# 构建目录
+build/
+/build*/
+
+tmp/
+vcenv.bat
+# 其他常见忽略文件
+*.log
+*.tlog
+.DS_Store
+Thumbs.db 
