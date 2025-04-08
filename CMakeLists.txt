@@ -15,9 +15,18 @@ set(PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # 添加项目的include目录
 include_directories(${PROJECT_SOURCE_DIR}/src/include)
-
-
 include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server)
+
+# 递归查找所有子目录并添加到包含路径
+file(GLOB_RECURSE MCP_SERVER_DIRS LIST_DIRECTORIES true ${PROJECT_SOURCE_DIR}/src/mcp_server/*)
+set(MCP_SERVER_INCLUDE_DIRS "")
+foreach(dir ${MCP_SERVER_DIRS})
+    if(IS_DIRECTORY ${dir})
+        # 将路径转换为CMake格式
+        file(TO_CMAKE_PATH ${dir} dir)
+        list(APPEND MCP_SERVER_INCLUDE_DIRS ${dir})
+    endif()
+endforeach()
 
 # 为MSVC设置MD运行库以匹配LLVM (确保这段代码在 add_subdirectory(cJSON) 之前)
 if(MSVC)
@@ -59,6 +68,18 @@ message(STATUS "CMAKE_BINARY_DIR: ${CMAKE_BINARY_DIR}")
 add_executable(extract_signatures ${PROJECT_SOURCE_DIR}/src/export.cpp)
 target_link_libraries(extract_signatures PRIVATE clangTooling clangASTMatchers clangFrontend clangDriver clangBasic)
 
+# 打印调试信息
+message(STATUS "MCP_SERVER_DIRS: ${MCP_SERVER_DIRS}")
+message(STATUS "MCP_SERVER_INCLUDE_DIRS: ${MCP_SERVER_INCLUDE_DIRS}")
+
+# 生成-I参数列表
+# set(INCLUDE_ARGS "-I${PROJECT_SOURCE_DIR}/src/include -I${CMAKE_CURRENT_SOURCE_DIR}/cJSON")
+# foreach(include_dir ${MCP_SERVER_INCLUDE_DIRS})
+#     string(APPEND INCLUDE_ARGS " -I${include_dir}")
+# endforeach()
+
+message(STATUS "INCLUDE_ARGS: ${INCLUDE_ARGS}")
+
 add_custom_command(
     OUTPUT ${FUNCTION_SIGNATURES_OUTPUT} ${BRIDGE_CODE_OUTPUT}
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
@@ -67,6 +88,9 @@ add_custom_command(
             ${MCP_SERVER_SOURCES} 
             -s ${FUNCTION_SIGNATURES_OUTPUT} 
             -b ${BRIDGE_CODE_OUTPUT}
+            -- -I${PROJECT_SOURCE_DIR}/src/include 
+            -I${CMAKE_CURRENT_SOURCE_DIR}/cJSON 
+            -I${PROJECT_SOURCE_DIR}/mcp_server/filesystems
     DEPENDS ${MCP_SERVER_SOURCES} extract_signatures ${COMPILE_COMMANDS_JSON}
     VERBATIM
 )

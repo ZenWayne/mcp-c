@@ -11,15 +11,17 @@
     #ifdef BUILDING_DLL
         #define EXPORT __declspec(dllexport)
         #define EXPORT_AS(x) __declspec(dllexport)
+        #define DES(x) __declspec(dllexport)
     #else
         #define EXPORT 
         #define EXPORT_AS(x) 
-#endif
-
+        #define DES(x) 
+    #endif
 #else
     // Clang 编译器
     #define EXPORT __attribute__((annotate("EXPORT")))
     #define EXPORT_AS(x) __attribute__((annotate("EXPORT_AS=" #x)))
+    #define DES(x) __attribute__((annotate("DESCRIPTION=" #x)))
 #endif
 
 #endif // EXPORT_MACRO_H

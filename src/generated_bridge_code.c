@@ -1,43 +1,41 @@
-// 桥接代码自动生成，请勿修改
+// 桥接代码 (自动生成，请勿修改)
 #include "cJSON.h"
-#include "string.h"
-#include "stdlib.h"
-#include "function_signature.h"
-#include "filesystems\file.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h> // For NULL, potentially error messages
+#include "file.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// 外部函数声明
-extern cJSON * real_get_person(int id);
-extern cJSON * real_save_person(person * person_obj);
+// --- External Function Declarations --- 
 
-inline person* parse_person(cJSON *json) {
-    person* obj = (person*)malloc(sizeof(person));
-    obj->name = cJSON_GetObjectItem(json, "name")->valuestring;
-    obj->age = cJSON_GetObjectItem(json, "age")->valueint;
-    obj->height = cJSON_GetObjectItem(json, "height")->valueint;
-    return obj;
-}
-
+// --- Main Bridge Function --- 
 cJSON* bridge(cJSON* input_json) {
-    const char* func_name = cJSON_GetObjectItem(input_json, "func")->valuestring;
-    cJSON* param_json = cJSON_GetObjectItem(input_json, "param");
-    if (strcmp(func_name, "real_get_person") == 0) {
-        int id = cJSON_GetObjectItem(param_json, "id")->valueint;
-        cJSON* result = real_get_person(id);
-        return result;
+    if (!input_json) return NULL;
+    cJSON* func_item = cJSON_GetObjectItem(input_json, "func");
+    cJSON* param_item = cJSON_GetObjectItem(input_json, "param");
+
+    if (!func_item || !cJSON_IsString(func_item) || !param_item || !cJSON_IsObject(param_item)) {
+        // Invalid input format
+        // TODO: Return error JSON?
+        return NULL;
     }
-    if (strcmp(func_name, "real_save_person") == 0) {
-        person* person_obj = parse_person(cJSON_GetObjectItem(param_json, "person_obj"));
-        cJSON* result = real_save_person(person_obj);
-        free(person_obj);
-        return result;
-    }
-    return NULL;
+
+    const char* func_name = func_item->valuestring;
+    cJSON* result = NULL;
+
+    // Memory to free after function call
+    #define MAX_ALLOCS 10 // Adjust as needed
+    void* allocations[MAX_ALLOCS];
+    int alloc_count = 0;
+
+
+    return result;
 }
+
 
 #ifdef __cplusplus
-}
+} // extern "C"
 #endif

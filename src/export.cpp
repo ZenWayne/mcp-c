@@ -1,405 +1,1092 @@
 #include "clang/AST/ASTContext.h"
+#include "clang/AST/RecordLayout.h" // Needed for QualType details potentially
 #include "clang/ASTMatchers/ASTMatchFinder.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendActions.h"
 #include "clang/Tooling/CommonOptionsParser.h"
 #include "clang/Tooling/Tooling.h"
 #include "clang/ASTMatchers/ASTMatchers.h"
-#include "clang/Lex/PreprocessorOptions.h"
+#include "clang/Lex/PreprocessorOptions.h" // If needed for header includes
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h" // For sys::fs::OF_Text
 #include <fstream>
 #include <sstream>
 #include <memory>
+#include <vector>
 #include <map>
+#include <set> // To keep track of generated parsers
 
 using namespace clang;
 using namespace clang::ast_matchers;
 using namespace clang::tooling;
 using namespace llvm;
 
+
+
 static cl::OptionCategory MyToolCategory("MCPC Options");
 
-// 添加两个输出文件选项
 static cl::opt<std::string> SigOutputFilename(
     "s",
-    cl::desc("指定函数签名输出文件名"),
+    cl::desc("指定函数签名 (JSON 生成 C 代码) 输出文件名"),
     cl::value_desc("filename"),
+    cl::Required, // Make required
     cl::cat(MyToolCategory));
 
 static cl::opt<std::string> BridgeOutputFilename(
     "b",
-    cl::desc("指定桥接代码输出文件名"),
+    cl::desc("指定桥接 (C 代码) 输出文件名"),
     cl::value_desc("filename"),
+    cl::Required, // Make required
     cl::cat(MyToolCategory));
 
-// 结构体信息存储
-struct StructInfo {
-    std::vector<const clang::FieldDecl*> fields;
-};
-std::map<std::string, StructInfo> structs;
+// --- Internal Data Structures (Task 1.1) ---
 
-// 类型映射
-const std::map<std::string, std::string> cjsontype_map = {
-    {"int", "valueint"},
-    {"bool", "valueint"},
-    {"char *", "valuestring"},
-    {"char*", "valuestring"}
+struct FieldInfo {
+    std::string name;
+    std::string description;
+    clang::QualType type;
 };
 
-// 结构体解析器
-class StructParser : public MatchFinder::MatchCallback {
-    raw_fd_ostream &OS;
-    raw_fd_ostream &sigOS;
-    std::vector<const FunctionDecl*> bridgeFunctions;
-    ASTContext *Context;  // 添加 ASTContext 成员变量
-    
-    void generate_parser(const std::string &struct_name) {
-        errs() << "生成解析函数: size=" << structs.size() << "\n";
-        if (structs.find(struct_name) == structs.end()) return;
-        
-        OS << "inline " << struct_name << "* parse_" << struct_name 
-           << "(cJSON *json) {\n"
-           << "    " << struct_name << "* obj = (" << struct_name << "*)malloc(sizeof(" << struct_name << "));\n";
-        
-        for (const auto &FD : structs[struct_name].fields) {
-            clang::QualType type = FD->getType();
-            std::string type_str = type.getAsString();
-            if (cjsontype_map.count(type_str)) {
-                OS << "    obj->" << FD->getNameAsString() << " = cJSON_GetObjectItem(json, \""
-                   << FD->getNameAsString() << "\")->" << cjsontype_map.at(type_str) << ";\n";
-            } else if (type->isPointerType()) {
-                const clang::PointerType *PT = type->getAs<clang::PointerType>();
-                std::string pointeeType_str = PT->getPointeeType().getAsString();
-                
-                if (structs.count(pointeeType_str)) {
-                    OS << "    obj->" << FD->getNameAsString() << " = parse_" 
-                       << pointeeType_str
-                       << "(cJSON_GetObjectItem(json, \"" << FD->getNameAsString() << "\"));\n";
-                }
+struct ParameterInfo {
+    std::string name;
+    std::string description;
+    clang::QualType type;
+    // bool isRequired; // TODO: Implement logic if default values are supported
+};
+
+struct EnumConstantInfo {
+    std::string name;
+    // int64_t value; // If needed
+};
+
+struct EnumDefinition {
+    std::string exportName;
+    std::string originalName; // The C name (e.g., COLOR)
+    std::string description;
+    std::vector<EnumConstantInfo> constants;
+    clang::QualType underlyingType; // Usually int
+};
+
+struct StructDefinition {
+    std::string exportName;
+    std::string originalName; // The C name (e.g., struct person)
+    std::string description;
+    std::vector<FieldInfo> fields;
+};
+
+struct FunctionDefinition {
+    std::string exportName;
+    std::string originalName; // The C name (e.g., real_get_person)
+    std::string description;
+    clang::QualType returnType;
+    std::vector<ParameterInfo> parameters;
+};
+
+// Global storage for parsed definitions
+std::map<std::string, EnumDefinition> g_enums;
+std::map<std::string, StructDefinition> g_structs;
+std::vector<FunctionDefinition> g_functions;
+std::set<std::string> g_requiredIncludes; // Headers needed by generated code
+
+// --- Annotation Parser (Task 1.2) ---
+std::string getAnnotationValue(const clang::Decl* D, const std::string& annotationPrefix) {
+    if (!D || !D->hasAttrs()) {
+        return "";
+    }
+    for (const auto *Attr : D->getAttrs()) {
+        if (const auto *Annotate = dyn_cast<AnnotateAttr>(Attr)) {
+            llvm::StringRef annotation = Annotate->getAnnotation();
+            if (annotation.starts_with(annotationPrefix)) {
+                llvm::StringRef value = annotation.drop_front(annotationPrefix.length());
+                // Remove surrounding quotes or '#' if present (simple handling)
+                 if (value.starts_with("\"") && value.ends_with("\"")) {
+                    value = value.drop_front(1).drop_back(1);
+                 } else if (value.starts_with("#")) {
+                     value = value.drop_front(1); // Handle EXPORT_AS(#x)
+                 }
+                return value.str();
             }
         }
-        OS << "    return obj;\n}\n\n";
+    }
+    return "";
+}
+
+// --- Type Analysis & JSON Schema Generation Helper (Task 2.1 refinement) ---
+struct JsonSchemaInfo {
+    std::string type; // "integer", "string", "boolean", "number", "object", "array"
+    std::string ref;  // "#/$defs/..."
+    std::unique_ptr<JsonSchemaInfo> items; // For arrays
+    bool isEnum = false; // Special flag for enums treated as strings/integers in schema
+    std::string enumExportName; // Store enum name if isEnum is true
+};
+
+JsonSchemaInfo getJsonSchemaInfoForType(QualType qualType, ASTContext& context) {
+    JsonSchemaInfo schema;
+    const clang::Type* type = qualType.getCanonicalType().getTypePtr();
+
+    if (type->isBuiltinType()) {
+        const clang::BuiltinType* builtin = cast<clang::BuiltinType>(type);
+        switch (builtin->getKind()) {
+            case BuiltinType::Bool:
+                schema.type = "boolean";
+                break;
+            case BuiltinType::Char_S:
+            case BuiltinType::Char_U:
+                 // Check if it's actually char*
+                 if (qualType->isPointerType() && qualType->getPointeeType()->isCharType()) {
+                      schema.type = "string";
+                 } else {
+                     schema.type = "string"; // Treat single char as string? Or integer? Choose one. Let's go string for simplicity.
+                     errs() << "Warning: Treating single char type '" << qualType.getAsString() << "' as JSON string.\n";
+                 }
+                 break;
+            case BuiltinType::UChar:
+            case BuiltinType::SChar:
+            case BuiltinType::Short:
+            case BuiltinType::UShort:
+            case BuiltinType::Int:
+            case BuiltinType::UInt:
+            case BuiltinType::Long:
+            case BuiltinType::ULong:
+            case BuiltinType::LongLong:
+            case BuiltinType::ULongLong:
+                schema.type = "integer";
+                break;
+            case BuiltinType::Float:
+            case BuiltinType::Double:
+            case BuiltinType::LongDouble:
+                schema.type = "number";
+                break;
+            default:
+                schema.type = "string"; // Fallback for unknown builtins
+                errs() << "Warning: Unknown BuiltinType kind " << builtin->getKind() << ", defaulting to string for '" << qualType.getAsString() << "'\n";
+                break;
+        }
+    } else if (type->isPointerType()) {
+        const clang::PointerType* ptrType = cast<clang::PointerType>(type);
+        clang::QualType pointeeType = ptrType->getPointeeType();
+        const clang::Type* pointeeTypePtr = pointeeType.getCanonicalType().getTypePtr();
+
+        if (pointeeType->isCharType()) {
+            schema.type = "string";
+        } else if (const clang::RecordType* recordType = pointeeTypePtr->getAs<clang::RecordType>()) {
+             const clang::RecordDecl* recordDecl = recordType->getDecl();
+             if (recordDecl->isStruct() || recordDecl->isClass()) { // isClass for C++ structs
+                 std::string exportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+                 if (!exportName.empty() && g_structs.count(exportName)) {
+                     schema.ref = "#/$defs/" + exportName;
+                 } else {
+                      schema.type = "object"; // Fallback if not exported/found
+                      errs() << "Warning: Struct pointer '" << qualType.getAsString() << "' points to non-exported/unknown struct '" << recordDecl->getNameAsString() << "'. Defaulting to object.\n";
+                 }
+             } else {
+                 schema.type = "object"; // Fallback for other record types?
+                 errs() << "Warning: Pointer '" << qualType.getAsString() << "' points to unsupported record type. Defaulting to object.\n";
+             }
+        } else {
+            // Could be pointer to int, void*, etc. How to represent? Often string or object.
+            schema.type = "object"; // Generic fallback for other pointers
+             errs() << "Warning: Pointer type '" << qualType.getAsString() << "' not directly mapped to JSON schema. Defaulting to object.\n";
+        }
+    } else if (const EnumType* enumType = type->getAs<EnumType>()) {
+        const EnumDecl* enumDecl = enumType->getDecl();
+        std::string exportName = getAnnotationValue(enumDecl, "EXPORT_AS=");
+        bool isExported = enumDecl->hasAttr<AnnotateAttr>() && getAnnotationValue(enumDecl, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
+         if (!exportName.empty() || isExported) {
+             if (exportName.empty()) {
+                 exportName = enumDecl->getNameAsString(); // 如果没有 EXPORT_AS,使用枚举名
+             }
+             if (g_enums.count(exportName)) return schema; // Already processed
+             schema.ref = "#/$defs/" + exportName;
+             schema.isEnum = true; // Mark it, although ref takes precedence in schema
+             schema.enumExportName = exportName;
+         } else {
+             // Fallback: Treat as integer if no export name found
+             schema.type = "integer";
+             errs() << "Warning: Enum type '" << qualType.getAsString() << "' has no EXPORT_AS annotation. Defaulting to integer.\n";
+         }
+    } else if (const RecordType* recordType = type->getAs<RecordType>()) {
+        // Struct passed by value
+         const RecordDecl* recordDecl = recordType->getDecl();
+         if (recordDecl->isStruct() || recordDecl->isClass()) {
+             std::string exportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+             if (!exportName.empty() && g_structs.count(exportName)) {
+                 schema.ref = "#/$defs/" + exportName;
+             } else {
+                  schema.type = "object"; // Fallback
+                  errs() << "Warning: Struct '" << qualType.getAsString() << "' passed by value is not exported/known. Defaulting to object.\n";
+             }
+         } else {
+             schema.type = "object"; // Fallback
+             errs() << "Warning: Unsupported record type '" << qualType.getAsString() << "' passed by value. Defaulting to object.\n";
+         }
+    } else if (type->isArrayType()) {
+        schema.type = "array";
+        const clang::ArrayType* arrayType = cast<clang::ArrayType>(type);
+        clang::QualType elementType = arrayType->getElementType();
+        schema.items = std::make_unique<JsonSchemaInfo>(getJsonSchemaInfoForType(elementType, context));
+    } else if (const clang::TypedefType* typedefType = type->getAs<clang::TypedefType>()) {
+        // Look through the typedef
+        return getJsonSchemaInfoForType(typedefType->desugar(), context);
+    } else if (const clang::ElaboratedType* elaboratedType = type->getAs<clang::ElaboratedType>()) {
+        // Look through elaborated type (e.g., struct MyStruct)
+        return getJsonSchemaInfoForType(elaboratedType->getNamedType(), context);
+    }
+    else {
+        schema.type = "object"; // General fallback
+        errs() << "Warning: Unsupported type '" << qualType.getAsString() << "' encountered. Defaulting to object.\n";
     }
 
-public:
-    StructParser(raw_fd_ostream &OS_, raw_fd_ostream &sigOS_) : OS(OS_), sigOS(sigOS_), Context(nullptr) {
-        OS << "// 桥接代码自动生成，请勿修改\n"
-           << "#include \"cJSON.h\"\n"
-           << "#include \"string.h\"\n"
-           << "#include \"stdlib.h\"\n"
-           << "#include \"function_signature.h\"\n";
+    return schema;
+}
 
-    
-        errs() << "函数签名生成器初始化\n";
-        sigOS << "// 函数签名自动生成，请勿修改\n"
-              << "#include \"string.h\"\n"
-              << "#include \"function_signature.h\"\n\n"
-              << "#include \"cJSON.h\"\n";
+// --- Clang AST Consumer and Matcher Callback ---
 
+class ExportASTConsumer : public ASTConsumer {
+    ASTContext *Context;
+    raw_fd_ostream &sigOS; // For generated_function_signatures.c
+    raw_fd_ostream &bridgeOS; // For generated_bridge_code.c
+    std::string inputHeaderFile; // Store the main header file name
+
+
+    // Helper to get the unqualified original type name (e.g., "person" from "struct person")
+    std::string getBaseTypeName(QualType qt) {
+        QualType canonical = qt.getCanonicalType();
+         if (const RecordType *rt = canonical->getAs<RecordType>()) {
+             return rt->getDecl()->getNameAsString();
+         } else if (const EnumType *et = canonical->getAs<EnumType>()) {
+             return et->getDecl()->getNameAsString();
+         } else if (const TypedefType *tt = canonical->getAs<TypedefType>()) {
+             // For typedefs, might want the typedef name itself if it's simple
+             // Or recursively get the underlying base name
+             return getBaseTypeName(tt->desugar()); // Simple recursive approach
+         }
+         // Fallback for basic types or complex types not handled above
+         return qt.getAsString();
     }
 
-    void generate_extern_declarations() {
-        OS << "// 外部函数声明\n";
-        for (const FunctionDecl *FD : bridgeFunctions) {
-            std::string name = FD->getNameAsString();
-            OS << "extern " << FD->getReturnType().getAsString() << " " << name << "(";
-            for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                if (i > 0) OS << ", ";
-                const ParmVarDecl *param = FD->getParamDecl(i);
-                OS << param->getType().getAsString() << " " << param->getNameAsString();
-            }
-            OS << ");\n";
+
+    // Helper to generate the C code for creating a JSON schema object
+    void generateJsonSchemaCCode(raw_fd_ostream &os, const JsonSchemaInfo& schemaInfo, const std::string& parentVar, const std::string& keyVar) {
+        std::string schemaVar = keyVar + "_schema"; // e.g., "param_id_schema"
+        os << "        cJSON* " << schemaVar << " = cJSON_CreateObject();\n";
+        os << "        if (" << schemaVar << ") {\n"; // Check creation
+
+        if (!schemaInfo.ref.empty()) {
+            os << "            cJSON_AddStringToObject(" << schemaVar << ", \"$ref\", \"" << schemaInfo.ref << "\");\n";
+        } else if (schemaInfo.type == "array" && schemaInfo.items) {
+            os << "            cJSON_AddStringToObject(" << schemaVar << ", \"type\", \"array\");\n";
+            // Recursively generate items schema
+            std::string itemsKey = keyVar + "_items";
+            generateJsonSchemaCCode(os, *schemaInfo.items, schemaVar, itemsKey); // Parent is schemaVar, key is "items"
+        } else {
+             os << "            cJSON_AddStringToObject(" << schemaVar << ", \"type\", \"" << schemaInfo.type << "\");\n";
+             // Handle enum values if it's an enum *not* using $ref (e.g., directly defined)
+             // This case might not be needed if we always use $ref for exported enums
         }
-        OS << "\n";
+        // Add description if available (needs to be passed down or looked up)
+        // os << "            // Add description here if available\n";
+
+        // Add the generated schema object to its parent
+        if (parentVar.find("properties") != std::string::npos || parentVar.find("defs") != std::string::npos) { // Adding to properties/defs object
+             os << "            cJSON_AddItemToObject(" << parentVar << ", " << keyVar << ", " << schemaVar << ");\n";
+        } else if (schemaInfo.type == "array") { // Adding items schema to an array schema
+             os << "            cJSON_AddItemToObject(" << parentVar << ", \"items\", " << schemaVar << ");\n";
+        }
+         os << "        }\n"; // End if (schemaVar)
     }
 
-    void generate_signature() {
-        // 生成函数签名结构体
-        for (const FunctionDecl *FD : bridgeFunctions) {
-            std::string name = FD->getNameAsString();
- 
-            if (const AnnotateAttr *attr = FD->getAttr<AnnotateAttr>()) {
-                if (attr->getAnnotation().starts_with("EXPORT_AS")) {
-                    name = attr->getAnnotation().substr(10).str();
-                }
-            }
-            errs() << "导出函数: " << name << "\n";
-            errs() << "函数返回值: " << FD->getReturnType().getAsString() << "\n";
-            
-            // 生成参数数组
-            sigOS << "static struct ParameterInfo " << name << "_params[] = {\n";
-            for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                const ParmVarDecl *param = FD->getParamDecl(i);
-                sigOS << "    {\"" << param->getType().getAsString() << "\", \""
-                   << param->getNameAsString() << "\"}";
-                if (i < FD->getNumParams() - 1) {
-                    sigOS << ",";
-                }
-                sigOS << "\n";
-            }
-            sigOS << "};\n\n";
 
-            // 生成函数签名结构体
-            sigOS << "struct FunctionSignature " << name << "_signature = {\n";
-            sigOS << "    \"" << FD->getReturnType().getAsString() << "\",\n";
-            sigOS << "    " << FD->getNumParams() << ",\n";
-            sigOS << "    " << name << "_params\n";
-            sigOS << "};\n\n";
+     // Generate the `get_all_function_signatures_json` function (Tasks 2.2, 2.3)
+    void generateSignaturesAndDefsFile() {
+        sigOS << "// 函数签名 JSON 生成代码 (自动生成，请勿修改)\n";
+        sigOS << "#include \"cJSON.h\"\n";
+        sigOS << "#include \"string.h\" // For strcmp in potential enum parsing fallback\n\n";
+        // Include necessary C headers (struct/enum definitions)
+        for(const std::string& include : g_requiredIncludes) {
+             sigOS << "#include \"" << include << "\"\n";
         }
+        sigOS << "\n";
 
-        // 生成函数签名字典
-        sigOS << "// 定义函数签名字典\n";
-        sigOS << "static struct {\n";
-        sigOS << "    const char* name;\n";
-        sigOS << "    struct FunctionSignature* signature;\n";
-        sigOS << "} function_signature_map[] = {\n";
-        
-        for (const FunctionDecl *FD : bridgeFunctions) {
-            std::string name = FD->getNameAsString();
-            if (const AnnotateAttr *attr = FD->getAttr<AnnotateAttr>()) {
-                if (attr->getAnnotation().starts_with("EXPORT_AS")) {
-                    name = attr->getAnnotation().substr(10).str();
-                }
-            }
-            sigOS << "    {\"" << name << "\", &" << name << "_signature},\n";
-        }
-        sigOS << "    {NULL, NULL}  // 结束标记\n";
-        sigOS << "};\n\n";
+        sigOS << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
 
-        // 生成获取所有函数签名的JSON函数
         sigOS << "cJSON* get_all_function_signatures_json() {\n";
         sigOS << "    cJSON* root = cJSON_CreateObject();\n";
-        sigOS << "    if (root == NULL) {\n";
-        sigOS << "        return NULL;\n";
-        sigOS << "    }\n\n";
-        
-        sigOS << "    // 遍历所有函数签名\n";
-        sigOS << "    for (int i = 0; function_signature_map[i].name != NULL; i++) {\n";
-        sigOS << "        const char* func_name = function_signature_map[i].name;\n";
-        sigOS << "        struct FunctionSignature* sig = function_signature_map[i].signature;\n\n";
-        
-        sigOS << "        cJSON* func_obj = cJSON_CreateObject();\n";
-        sigOS << "        if (func_obj == NULL) {\n";
-        sigOS << "            cJSON_Delete(root);\n";
-        sigOS << "            return NULL;\n";
-        sigOS << "        }\n\n";
-        
-        sigOS << "        // 添加返回类型\n";
-        sigOS << "        cJSON_AddStringToObject(func_obj, \"return_type\", sig->returnType);\n";
-        sigOS << "        \n";
-        sigOS << "        // 添加参数数量\n";
-        sigOS << "        cJSON_AddNumberToObject(func_obj, \"param_count\", sig->parameterCount);\n";
-        sigOS << "        \n";
-        sigOS << "        // 创建参数数组\n";
-        sigOS << "        cJSON* params = cJSON_CreateArray();\n";
-        sigOS << "        if (params == NULL) {\n";
-        sigOS << "            cJSON_Delete(root);\n";
-        sigOS << "            return NULL;\n";
-        sigOS << "        }\n";
-        sigOS << "        \n";
-        sigOS << "        // 添加每个参数的信息\n";
-        sigOS << "        for (int j = 0; j < sig->parameterCount; j++) {\n";
-        sigOS << "            cJSON* param = cJSON_CreateObject();\n";
-        sigOS << "            if (param == NULL) {\n";
-        sigOS << "                cJSON_Delete(root);\n";
-        sigOS << "                return NULL;\n";
-        sigOS << "            }\n";
-        sigOS << "            \n";
-        sigOS << "            cJSON_AddStringToObject(param, \"type\", sig->params[j].type);\n";
-        sigOS << "            cJSON_AddStringToObject(param, \"name\", sig->params[j].name);\n";
-        sigOS << "            cJSON_AddItemToArray(params, param);\n";
-        sigOS << "        }\n";
-        sigOS << "        \n";
-        sigOS << "        cJSON_AddItemToObject(func_obj, \"params\", params);\n";
-        sigOS << "        cJSON_AddItemToObject(root, func_name, func_obj);\n";
-        sigOS << "    }\n\n";
+        sigOS << "    if (!root) return NULL;\n\n";
+
+        // --- Generate $defs (Task 2.2) ---
+        sigOS << "    // --- $defs --- \n";
+        sigOS << "    cJSON* defs = cJSON_CreateObject();\n";
+        sigOS << "    if (!defs) { cJSON_Delete(root); return NULL; }\n";
+        sigOS << "    cJSON_AddItemToObject(root, \"$defs\", defs);\n\n";
+
+        // $defs for Enums
+        for (const auto& [exportName, enumDef] : g_enums) {
+            sigOS << "    // Definition for enum: " << exportName << "\n";
+            sigOS << "    {\n";
+            sigOS << "        cJSON* enum_def = cJSON_CreateObject();\n";
+            sigOS << "        if (enum_def) {\n";
+            if (!enumDef.description.empty()) {
+                sigOS << "            cJSON_AddStringToObject(enum_def, \"description\", \"" << enumDef.description << "\");\n";
+            }
+             // Use underlying type for JSON schema type
+             JsonSchemaInfo typeInfo = getJsonSchemaInfoForType(enumDef.underlyingType, *Context);
+            sigOS << "            cJSON_AddStringToObject(enum_def, \"type\", \"" << typeInfo.type << "\"); // Assuming underlying type maps well\n";
+
+            sigOS << "            cJSON* enum_values = cJSON_CreateArray();\n";
+            sigOS << "            if (enum_values) {\n";
+            for (const auto& constant : enumDef.constants) {
+                sigOS << "                cJSON_AddItemToArray(enum_values, cJSON_CreateString(\"" << constant.name << "\"));\n";
+            }
+            sigOS << "                cJSON_AddItemToObject(enum_def, \"enum\", enum_values);\n";
+            sigOS << "            }\n"; // end if enum_values
+            sigOS << "            cJSON_AddItemToObject(defs, \"" << exportName << "\", enum_def);\n";
+             sigOS << "        } // end if enum_def\n";
+            sigOS << "    }\n\n";
+        }
+
+        // $defs for Structs
+        for (const auto& [exportName, structDef] : g_structs) {
+            sigOS << "    // Definition for struct: " << exportName << "\n";
+            sigOS << "    {\n";
+            sigOS << "        cJSON* struct_def = cJSON_CreateObject();\n";
+             sigOS << "        if (struct_def) {\n";
+            if (!structDef.description.empty()) {
+                sigOS << "            cJSON_AddStringToObject(struct_def, \"description\", \"" << structDef.description << "\");\n";
+            }
+            sigOS << "            cJSON_AddStringToObject(struct_def, \"type\", \"object\");\n";
+            sigOS << "            cJSON* properties = cJSON_CreateObject();\n";
+            sigOS << "            if (properties) {\n";
+             sigOS << "                cJSON* required_props = cJSON_CreateArray(); // Structs usually have all properties required unless optional pointers\n";
+             sigOS << "                if(required_props) {\n";
+
+            for (const auto& field : structDef.fields) {
+                sigOS << "                // Field: " << field.name << "\n";
+                JsonSchemaInfo schemaInfo = getJsonSchemaInfoForType(field.type, *Context);
+                std::string fieldSchemaVar = exportName + "_" + field.name + "_schema";
+                std::string fieldKey = "\"" + field.name + "\"";
+
+                sigOS << "                cJSON* " << fieldSchemaVar << " = cJSON_CreateObject();\n";
+                 sigOS << "                if (" << fieldSchemaVar << ") {\n";
+
+                 if (!schemaInfo.ref.empty()) {
+                     sigOS << "                    cJSON_AddStringToObject(" << fieldSchemaVar << ", \"$ref\", \"" << schemaInfo.ref << "\");\n";
+                 } else if (schemaInfo.type == "array" && schemaInfo.items) {
+                     sigOS << "                    cJSON_AddStringToObject(" << fieldSchemaVar << ", \"type\", \"array\");\n";
+                     std::string itemsSchemaVar = fieldSchemaVar + "_items";
+                     std::string itemsKeyStr = "\"items\"";
+                     // Generate items schema C code
+                     sigOS << "                    cJSON* " << itemsSchemaVar << " = cJSON_CreateObject();\n";
+                      sigOS << "                    if (" << itemsSchemaVar << ") {\n";
+                      if (!schemaInfo.items->ref.empty()) {
+                          sigOS << "                        cJSON_AddStringToObject(" << itemsSchemaVar << ", \"$ref\", \"" << schemaInfo.items->ref << "\");\n";
+                      } else {
+                          sigOS << "                        cJSON_AddStringToObject(" << itemsSchemaVar << ", \"type\", \"" << schemaInfo.items->type << "\");\n";
+                      }
+                        sigOS << "                        cJSON_AddItemToObject(" << fieldSchemaVar << ", " << itemsKeyStr << ", " << itemsSchemaVar << ");\n";
+                       sigOS << "                    }\n"; // end if itemsSchemaVar
+                 } else {
+                     sigOS << "                    cJSON_AddStringToObject(" << fieldSchemaVar << ", \"type\", \"" << schemaInfo.type << "\");\n";
+                 }
+
+                 if (!field.description.empty()) {
+                    sigOS << "                    cJSON_AddStringToObject(" << fieldSchemaVar << ", \"description\", \"" << field.description << "\");\n";
+                 }
+
+                 sigOS << "                    cJSON_AddItemToObject(properties, " << fieldKey << ", " << fieldSchemaVar << ");\n";
+                 // Assume all struct fields are required for now unless they are pointers? Needs refinement.
+                 sigOS << "                    cJSON_AddItemToArray(required_props, cJSON_CreateString(" << fieldKey << "));\n";
+                 sigOS << "                }\n"; // end if fieldSchemaVar
+            }
+            sigOS << "                    cJSON_AddItemToObject(struct_def, \"properties\", properties);\n";
+            sigOS << "                    cJSON_AddItemToObject(struct_def, \"required\", required_props);\n";
+            sigOS << "                 } else { cJSON_Delete(properties); } // end if required_props\n"; // Cleanup if required fails
+            sigOS << "            } // end if properties\n";
+            sigOS << "            cJSON_AddItemToObject(defs, \"" << exportName << "\", struct_def);\n";
+             sigOS << "        } // end if struct_def\n";
+            sigOS << "    }\n\n";
+        }
+
+
+        // --- Generate tools (Task 2.3) ---
+        sigOS << "    // --- tools --- \n";
+        sigOS << "    cJSON* tools = cJSON_CreateArray();\n";
+        sigOS << "    if (!tools) { cJSON_Delete(root); return NULL; }\n";
+        sigOS << "    cJSON_AddItemToObject(root, \"tools\", tools);\n\n";
+
+        for (const auto& funcDef : g_functions) {
+            sigOS << "    // Tool for function: " << funcDef.exportName << "\n";
+            sigOS << "    {\n";
+            sigOS << "        cJSON* tool = cJSON_CreateObject();\n";
+            sigOS << "        if (tool) {\n";
+            sigOS << "            cJSON_AddStringToObject(tool, \"name\", \"" << funcDef.exportName << "\");\n";
+            if (!funcDef.description.empty()) {
+                sigOS << "            cJSON_AddStringToObject(tool, \"description\", \"" << funcDef.description << "\");\n";
+            } else {
+                 sigOS << "            cJSON_AddStringToObject(tool, \"description\", \"\"); // Add empty description if none provided\n";
+            }
+
+            sigOS << "            cJSON* inputSchema = cJSON_CreateObject();\n";
+            sigOS << "            if (inputSchema) {\n";
+            sigOS << "                cJSON_AddStringToObject(inputSchema, \"type\", \"object\");\n";
+            sigOS << "                cJSON* properties = cJSON_CreateObject();\n";
+            sigOS << "                cJSON* required = cJSON_CreateArray();\n";
+
+            sigOS << "                if (properties && required) {\n";
+            for (const auto& param : funcDef.parameters) {
+                 sigOS << "                // Parameter: " << param.name << "\n";
+                 JsonSchemaInfo schemaInfo = getJsonSchemaInfoForType(param.type, *Context);
+                 std::string paramSchemaVar = funcDef.exportName + "_" + param.name + "_schema";
+                 std::string paramKey = "\"" + param.name + "\"";
+
+                 sigOS << "                cJSON* " << paramSchemaVar << " = cJSON_CreateObject();\n";
+                  sigOS << "                if (" << paramSchemaVar << ") {\n";
+
+                  if (!schemaInfo.ref.empty()) {
+                      sigOS << "                    cJSON_AddStringToObject(" << paramSchemaVar << ", \"$ref\", \"" << schemaInfo.ref << "\");\n";
+                  } else if (schemaInfo.type == "array" && schemaInfo.items) {
+                      sigOS << "                    cJSON_AddStringToObject(" << paramSchemaVar << ", \"type\", \"array\");\n";
+                      std::string itemsSchemaVar = paramSchemaVar + "_items";
+                      std::string itemsKeyStr = "\"items\"";
+                      // Generate items schema C code
+                      sigOS << "                    cJSON* " << itemsSchemaVar << " = cJSON_CreateObject();\n";
+                       sigOS << "                    if (" << itemsSchemaVar << ") {\n";
+                       if (!schemaInfo.items->ref.empty()) {
+                           sigOS << "                        cJSON_AddStringToObject(" << itemsSchemaVar << ", \"$ref\", \"" << schemaInfo.items->ref << "\");\n";
+                       } else {
+                           sigOS << "                        cJSON_AddStringToObject(" << itemsSchemaVar << ", \"type\", \"" << schemaInfo.items->type << "\");\n";
+                       }
+                        sigOS << "                        cJSON_AddItemToObject(" << paramSchemaVar << ", " << itemsKeyStr << ", " << itemsSchemaVar << ");\n";
+                       sigOS << "                    }\n"; // end if itemsSchemaVar
+                  } else {
+                      sigOS << "                    cJSON_AddStringToObject(" << paramSchemaVar << ", \"type\", \"" << schemaInfo.type << "\");\n";
+                  }
+
+                  if (!param.description.empty()) {
+                     sigOS << "                    cJSON_AddStringToObject(" << paramSchemaVar << ", \"description\", \"" << param.description << "\");\n";
+                  }
+                  // Add default value if available (TODO)
+                  // if (param.hasDefault) { ... cJSON_Add...ToObject(paramSchemaVar, "default", ...); }
+
+                  sigOS << "                    cJSON_AddItemToObject(properties, " << paramKey << ", " << paramSchemaVar << ");\n";
+                  // Assume required if no default (TODO: refine this logic)
+                  sigOS << "                    cJSON_AddItemToArray(required, cJSON_CreateString(" << paramKey << "));\n";
+                  sigOS << "                 }\n"; // end if paramSchemaVar
+            }
+            sigOS << "                    cJSON_AddItemToObject(inputSchema, \"properties\", properties);\n";
+            sigOS << "                    cJSON_AddItemToObject(inputSchema, \"required\", required);\n";
+             sigOS << "                } else { \n"; // Cleanup if properties/required alloc fails
+             sigOS << "                    if (properties) cJSON_Delete(properties);\n";
+             sigOS << "                    if (required) cJSON_Delete(required);\n";
+             sigOS << "                    cJSON_Delete(inputSchema);\n"; // Delete schema if internals fail
+             sigOS << "                    inputSchema = NULL;\n";
+             sigOS << "                }\n"; // end if properties && required
+
+             sigOS << "                 if (inputSchema) {\n"; // Check again before adding
+             sigOS << "                     cJSON_AddFalseToObject(inputSchema, \"additionalProperties\");\n";
+             sigOS << "                     cJSON_AddStringToObject(inputSchema, \"$schema\", \"http://json-schema.org/draft-07/schema#\");\n";
+             sigOS << "                     cJSON_AddItemToObject(tool, \"inputSchema\", inputSchema);\n";
+             sigOS << "                 }\n";
+            sigOS << "            } // end if inputSchema\n";
+             sigOS << "            if (inputSchema) { // Only add tool if input schema was successful";
+                 sigOS << "               cJSON_AddItemToArray(tools, tool);\n";
+             sigOS << "            } else { cJSON_Delete(tool); } // Clean up tool if schema failed\n";
+            sigOS << "        } // end if tool\n";
+            sigOS << "    }\n\n";
+        }
+
         sigOS << "    return root;\n";
-        sigOS << "}\n";
+        sigOS << "}\n\n";
+
+        sigOS << "#ifdef __cplusplus\n} // extern \"C\"\n#endif\n";
+        sigOS.flush(); // Ensure content is written
     }
 
-    ~StructParser() {
-        OS << "\n#ifdef __cplusplus\n";
-        OS << "}\n";
-        OS << "#endif\n";
-        OS.close();
-        
-        sigOS << "\n#ifdef __cplusplus\n";
-        sigOS << "}\n";
-        sigOS << "#endif\n";
-        sigOS.close();
-    }
 
-    void generate_bridge_function() {
-        OS << "cJSON* bridge(cJSON* input_json) {\n"
-           << "    const char* func_name = cJSON_GetObjectItem(input_json, \"func\")->valuestring;\n"
-           << "    cJSON* param_json = cJSON_GetObjectItem(input_json, \"param\");\n";
+    // --- Bridge Code Generation (Phase 3) ---
 
-        errs() << "桥接函数数量: " << bridgeFunctions.size() << "\n";
-        errs() << "结构体数量: " << structs.size() << "\n";
-       // 生成所有桥接函数
-        for (const FunctionDecl *FD : bridgeFunctions) {
-            OS << "    if (strcmp(func_name, \"" << FD->getNameAsString() << "\") == 0) {\n";
-            
-            // 参数解析
-            for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                const ParmVarDecl *param = FD->getParamDecl(i);
-                clang::QualType type = param->getType();
-                
-                errs()<<FD->getNameAsString()<< "函数入参参数类型: " << type << "\n";
-                errs() << "类型指针: " << type.getTypePtr() << "\n";
-                errs() << "是否指针类型: " << type.getTypePtr()->isPointerType() << "\n";
-                if (type.getTypePtr()->isPointerType()) {
-                    errs() << "入参类型: " << type.getAsString() << "\n";
-                    const clang::PointerType* pointerType = type.getTypePtr()->getAs<clang::PointerType>();
-                    clang::QualType pointeeType = pointerType->getPointeeType();
-                    errs() << "入参类型: " << pointeeType.getAsString() << "\n";
-                    OS << "        " << pointeeType.getAsString() << "* " << param->getNameAsString() << " = parse_" 
-                       << pointeeType.getAsString() << "(cJSON_GetObjectItem(param_json, \""
-                       << param->getNameAsString() << "\"));\n";
-                } else {
-                    std::string type_str = type.getAsString();
-                    if (cjsontype_map.count(type_str)) {
-                        type_str = cjsontype_map.at(type_str);
-                    }else {
-                        errs() << "不支持的类型: " << type_str << "\n";
-                        continue;
-                    }
-                    OS << "        " << type << " " << param->getNameAsString() 
-                       << " = cJSON_GetObjectItem(param_json, \"" << param->getNameAsString() 
-                       << "\")->" << type_str << ";\n";
-                }
-            }
-            
-            // 函数调用和清理
-            OS << "        cJSON* result = " << FD->getNameAsString() << "(";
-            for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                if (i > 0) OS << ", ";
-                const ParmVarDecl *param = FD->getParamDecl(i);
-                clang::QualType type = param->getType();
-                if (type.getTypePtr()->isPointerType()) {
-                    OS << param->getNameAsString();
-                } else {
-                    OS << param->getNameAsString();
-                }
-            }
-            OS << ");\n";
-            
-            // 释放指针参数
-            for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                const ParmVarDecl *param = FD->getParamDecl(i);
-                clang::QualType type = param->getType();
-                if (type.getTypePtr()->isPointerType()) {
-                    OS << "        free(" << param->getNameAsString() << ");\n";
-                }
-            }
-            
-            OS << "        return result;\n    }\n";
+    // Generate parser for a specific Enum (Task 3.2)
+    void generateEnumParser(const EnumDefinition& enumDef) {
+        bridgeOS << "// Parser for enum " << enumDef.exportName << "\n";
+        // Use original C enum type name in the function signature
+        bridgeOS << "static inline " << enumDef.originalName << " parse_" << enumDef.exportName << "(cJSON *json) {\n";
+        bridgeOS << "    if (!json) return (" << enumDef.originalName << ")0; // Or a default/error value\n";
+        bridgeOS << "    if (cJSON_IsString(json)) {\n";
+        bridgeOS << "        const char* str = json->valuestring;\n";
+        for (size_t i = 0; i < enumDef.constants.size(); ++i) {
+            const auto& constant = enumDef.constants[i];
+            bridgeOS << "        " << (i > 0 ? "else if" : "if") << " (strcmp(str, \"" << constant.name << "\") == 0) {\n";
+            // Use the original C constant name here
+            bridgeOS << "            return " << constant.name << ";\n";
+             bridgeOS << "        }\n";
         }
-        OS << "    return NULL;\n}\n";
-    }
-    void generate_header_file() {
-        if (Context) {
-            SourceManager &SM = Context->getSourceManager();
-            FileID FID = SM.getMainFileID();
-            if (const FileEntry *FE = SM.getFileEntryForID(FID)) {
-                StringRef filename = FE->tryGetRealPathName();
-                std::string header_filename = filename.str();
-                size_t dot_pos = header_filename.rfind('.');
-                if (dot_pos != std::string::npos) {
-                    header_filename = header_filename.substr(0, dot_pos) + ".h";
-                }
-                size_t last_slash = header_filename.find_last_of("/\\");
-                if (last_slash != std::string::npos) {
-                    size_t second_last_slash = header_filename.find_last_of("/\\", last_slash - 1);
-                    if (second_last_slash != std::string::npos) {
-                        header_filename = header_filename.substr(second_last_slash + 1);
-                    }
-                }
-                errs() << "开始处理翻译单元: " << header_filename << "\n";
-                OS << "#include \"" << header_filename << "\"\n\n";
-            }
-        }
-    }
-    void onEndOfTranslationUnit() {
-
-        generate_header_file();
-        OS << "#ifdef __cplusplus\n"
-           << "extern \"C\" {\n"
-           << "#endif\n\n";
-        generate_extern_declarations();
-        // 生成所有结构体解析函数
-        for (const auto &[name, _] : structs) {
-            generate_parser(name);
-        }
-        
-        generate_bridge_function();
-        generate_signature();
+        bridgeOS << "        else {\n";
+        bridgeOS << "            // Handle error: unknown string value\n";
+        bridgeOS << "            return (" << enumDef.originalName << ")0; // Default/error value\n";
+        bridgeOS << "        }\n";
+        bridgeOS << "    } else if (cJSON_IsNumber(json)) {\n";
+        // Assuming the number corresponds directly to the enum value
+        bridgeOS << "        return (" << enumDef.originalName << ")json->valueint;\n";
+        bridgeOS << "    } else {\n";
+        bridgeOS << "         // Handle error: unexpected JSON type\n";
+         bridgeOS << "        return (" << enumDef.originalName << ")0; // Default/error value\n";
+        bridgeOS << "    }\n";
+        bridgeOS << "}\n\n";
     }
 
-    void run(const MatchFinder::MatchResult &Result) override {
-        Context = Result.Context;  // 设置 Context
-        
-        if (const RecordDecl *RD = Result.Nodes.getNodeAs<RecordDecl>("structDecl")) {
-            StructInfo info;
-            errs() << "解析结构体: " << RD->getNameAsString() << "\n";
-            for (const FieldDecl *FD : RD->fields()) {
-                info.fields.push_back(FD);
+    // Generate parser for a specific Struct (Task 3.1)
+    void generateStructParser(const StructDefinition& structDef) {
+        bridgeOS << "// Parser for struct " << structDef.exportName << "\n";
+         // Use original C struct type name
+        bridgeOS << "static inline struct " << structDef.originalName << "* parse_" << structDef.exportName << "(cJSON *json) {\n";
+        bridgeOS << "    if (!json || !cJSON_IsObject(json)) return NULL;\n";
+         // Use original C struct type name for malloc
+        bridgeOS << "    struct " << structDef.originalName << "* obj = (struct " << structDef.originalName << "*)malloc(sizeof(struct " << structDef.originalName << "));\n";
+        bridgeOS << "    if (!obj) return NULL;\n";
+        bridgeOS << "    memset(obj, 0, sizeof(struct " << structDef.originalName << ")); // Initialize memory\n\n";
+
+        for (const auto& field : structDef.fields) {
+            bridgeOS << "    // Field: " << field.name << "\n";
+            bridgeOS << "    cJSON* field_json = cJSON_GetObjectItem(json, \"" << field.name << "\");\n";
+            bridgeOS << "    if (field_json && !cJSON_IsNull(field_json)) { // Check field exists and is not null\n";
+
+            QualType fieldType = field.type.getCanonicalType();
+            const clang::Type* typePtr = fieldType.getTypePtr();
+
+            if (typePtr->isBuiltinType() || (typePtr->isPointerType() && typePtr->getPointeeType()->isCharType())) {
+                 JsonSchemaInfo schema = getJsonSchemaInfoForType(field.type, *Context); // Re-use schema info logic
+                 if (schema.type == "string") {
+                     bridgeOS << "        if (cJSON_IsString(field_json)) {\n";
+                     bridgeOS << "            obj->" << field.name << " = strdup(field_json->valuestring);\n";
+                      bridgeOS << "           // TODO: Remember to free this string later!\n";
+                     bridgeOS << "        }\n";
+                 } else if (schema.type == "integer") {
+                     bridgeOS << "        if (cJSON_IsNumber(field_json)) {\n";
+                     bridgeOS << "            obj->" << field.name << " = field_json->valueint;\n";
+                     bridgeOS << "        }\n";
+                 } else if (schema.type == "boolean") {
+                      bridgeOS << "        if (cJSON_IsBool(field_json)) {\n";
+                      bridgeOS << "            obj->" << field.name << " = cJSON_IsTrue(field_json);\n";
+                      bridgeOS << "        }\n";
+                 } else if (schema.type == "number") {
+                     bridgeOS << "        if (cJSON_IsNumber(field_json)) {\n";
+                     bridgeOS << "            obj->" << field.name << " = field_json->valuedouble;\n";
+                     bridgeOS << "        }\n";
+                 }
+            } else if (const EnumType* enumType = typePtr->getAs<EnumType>()) {
+                 std::string enumExportName = getAnnotationValue(enumType->getDecl(), "EXPORT_AS=");
+                 if (!enumExportName.empty()) {
+                     bridgeOS << "        obj->" << field.name << " = parse_" << enumExportName << "(field_json);\n";
+                 } else {
+                     bridgeOS << "        // Warning: Cannot parse non-exported enum field '" << field.name << "'\n";
+                 }
+            } else if (const RecordType* recordType = typePtr->getAs<RecordType>()) {
+                // Struct by value
+                 std::string structExportName = getAnnotationValue(recordType->getDecl(), "EXPORT_AS=");
+                 if (!structExportName.empty()) {
+                      // Use original C type name for temp variable
+                     std::string originalFieldTypeName = getBaseTypeName(field.type);
+                     bridgeOS << "        struct " << originalFieldTypeName << "* temp_" << field.name << " = parse_" << structExportName << "(field_json);\n";
+                     bridgeOS << "        if (temp_" << field.name << ") {\n";
+                     bridgeOS << "            obj->" << field.name << " = *temp_" << field.name << "; // Copy value\n";
+                     bridgeOS << "            free(temp_" << field.name << "); // Free temporary parsed object\n";
+                     bridgeOS << "        }\n";
+                 } else {
+                      bridgeOS << "        // Warning: Cannot parse non-exported struct value field '" << field.name << "'\n";
+                 }
+            } else if (typePtr->isPointerType()) {
+                 QualType pointeeType = typePtr->getPointeeType();
+                 if (const RecordType* pointeeRecord = pointeeType.getCanonicalType()->getAs<RecordType>()) {
+                     // Pointer to struct
+                      std::string structExportName = getAnnotationValue(pointeeRecord->getDecl(), "EXPORT_AS=");
+                      if (!structExportName.empty()) {
+                          bridgeOS << "        obj->" << field.name << " = parse_" << structExportName << "(field_json);\n";
+                           bridgeOS << "       // Note: Caller of parse_" << structDef.exportName << " might need to free this pointer\n";
+                      } else {
+                           bridgeOS << "        // Warning: Cannot parse pointer to non-exported struct field '" << field.name << "'\n";
+                           bridgeOS << "        obj->" << field.name << " = NULL;\n";
+                      }
+                 } else {
+                      bridgeOS << "        // Warning: Unsupported pointer type for field '" << field.name << "'\n";
+                      bridgeOS << "        obj->" << field.name << " = NULL;\n";
+                 }
+            } else if (typePtr->isArrayType()) {
+                bridgeOS << "        // TODO: Implement array parsing for field '" << field.name << "'\n";
             }
-            structs[RD->getNameAsString()] = info;
-        } else if (const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("exportedFunction")) {
-            errs() << "解析接口函数: " << FD->getNameAsString() << "\n";
-            bridgeFunctions.push_back(FD);
+             else {
+                 bridgeOS << "        // Warning: Unsupported type for field '" << field.name << "'\n";
+            }
+
+            bridgeOS << "    } else {\n";
+            bridgeOS << "        // Field missing or null in JSON, obj->" << field.name << " remains initialized (likely 0/NULL)\n";
+            bridgeOS << "    }\n";
         }
+
+        bridgeOS << "\n    return obj;\n";
+        bridgeOS << "}\n\n";
+    }
+
+    // Generate the main bridge function (Task 3.3)
+    void generateBridgeFunction() {
+        bridgeOS << "// --- Main Bridge Function --- \n";
+        bridgeOS << "cJSON* bridge(cJSON* input_json) {\n";
+        bridgeOS << "    if (!input_json) return NULL;\n"; // Basic validation
+        bridgeOS << "    cJSON* func_item = cJSON_GetObjectItem(input_json, \"func\");\n";
+        bridgeOS << "    cJSON* param_item = cJSON_GetObjectItem(input_json, \"param\");\n\n";
+        bridgeOS << "    if (!func_item || !cJSON_IsString(func_item) || !param_item || !cJSON_IsObject(param_item)) {\n";
+        bridgeOS << "        // Invalid input format\n";
+        bridgeOS << "        // TODO: Return error JSON?\n";
+        bridgeOS << "        return NULL;\n";
+        bridgeOS << "    }\n\n";
+        bridgeOS << "    const char* func_name = func_item->valuestring;\n";
+        bridgeOS << "    cJSON* result = NULL;\n\n";
+        // Keep track of allocated memory that needs freeing after the call
+        bridgeOS << "    // Memory to free after function call\n";
+        bridgeOS << "    #define MAX_ALLOCS 10 // Adjust as needed\n";
+        bridgeOS << "    void* allocations[MAX_ALLOCS];\n";
+        bridgeOS << "    int alloc_count = 0;\n\n";
+
+
+        for (size_t i = 0; i < g_functions.size(); ++i) {
+            const auto& funcDef = g_functions[i];
+            bridgeOS << "    " << (i > 0 ? "} else " : "") << "if (strcmp(func_name, \"" << funcDef.exportName << "\") == 0) {\n";
+            // Declare parameter variables
+            for (const auto& param : funcDef.parameters) {
+                // Use original C type name for variable declaration
+                 bridgeOS << "        " << param.type.getAsString() << " p_" << param.name << " = {0}; // Initialize\n";
+            }
+             bridgeOS << "\n";
+
+            // Parse parameters
+             bridgeOS << "        // Parse parameters\n";
+            bool parsing_ok = true; // Simple flag for now
+            for (const auto& param : funcDef.parameters) {
+                bridgeOS << "        cJSON* p_json = cJSON_GetObjectItem(param_item, \"" << param.name << "\");\n";
+                // TODO: Add check if parameter is required and p_json is NULL
+                bridgeOS << "        if (p_json && !cJSON_IsNull(p_json)) {\n";
+
+                 QualType paramType = param.type.getCanonicalType();
+                 const clang::Type* typePtr = paramType.getTypePtr();
+
+                 if (typePtr->isBuiltinType() || (typePtr->isPointerType() && typePtr->getPointeeType()->isCharType())) {
+                      JsonSchemaInfo schema = getJsonSchemaInfoForType(param.type, *Context);
+                      if (schema.type == "string") {
+                          bridgeOS << "            if (cJSON_IsString(p_json)) {\n";
+                           bridgeOS << "                p_" << param.name << " = strdup(p_json->valuestring);\n";
+                           bridgeOS << "                if (p_" << param.name << " && alloc_count < MAX_ALLOCS) allocations[alloc_count++] = p_" << param.name << ";\n"; // Track allocation
+                           bridgeOS << "            }\n";
+                      } else if (schema.type == "integer") {
+                           bridgeOS << "            if (cJSON_IsNumber(p_json)) p_" << param.name << " = p_json->valueint;\n";
+                      } else if (schema.type == "boolean") {
+                            bridgeOS << "            if (cJSON_IsBool(p_json)) p_" << param.name << " = cJSON_IsTrue(p_json);\n";
+                      } else if (schema.type == "number") {
+                           bridgeOS << "            if (cJSON_IsNumber(p_json)) p_" << param.name << " = p_json->valuedouble;\n";
+                      }
+                 } else if (const EnumType* enumType = typePtr->getAs<EnumType>()) {
+                      std::string enumExportName = getAnnotationValue(enumType->getDecl(), "EXPORT_AS=");
+                      if (!enumExportName.empty()) {
+                          bridgeOS << "            p_" << param.name << " = parse_" << enumExportName << "(p_json);\n";
+                      }
+                 } else if (typePtr->isPointerType() && typePtr->getPointeeType().getCanonicalType()->getAs<RecordType>()) {
+                     // Pointer to struct
+                     QualType pointeeType = typePtr->getPointeeType();
+                      const RecordDecl* recordDecl = pointeeType.getCanonicalType()->getAs<RecordType>()->getDecl();
+                      std::string structExportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+                      if (!structExportName.empty()) {
+                          bridgeOS << "            p_" << param.name << " = parse_" << structExportName << "(p_json);\n";
+                           bridgeOS << "           if (p_" << param.name << " && alloc_count < MAX_ALLOCS) allocations[alloc_count++] = p_" << param.name << ";\n"; // Track allocation
+                      }
+                 } else if (typePtr->isArrayType()) {
+                     bridgeOS << "            // TODO: Array parameter parsing for " << param.name << "\n";
+                 }
+                  else {
+                     bridgeOS << "            // Warning: Unsupported parameter type for " << param.name << "\n";
+                 }
+
+                bridgeOS << "        } else {\n";
+                 bridgeOS << "           // Parameter " << param.name << " missing or null\n";
+                 // TODO: Check if required, set parsing_ok = false if so
+                 bridgeOS << "        }\n";
+            }
+             bridgeOS << "\n";
+
+            // Call the original function
+             bridgeOS << "        // Call original function\n";
+             bridgeOS << "        result = " << funcDef.originalName << "(";
+            for (size_t p_idx = 0; p_idx < funcDef.parameters.size(); ++p_idx) {
+                bridgeOS << (p_idx > 0 ? ", " : "") << "p_" << funcDef.parameters[p_idx].name;
+            }
+            bridgeOS << ");\n";
+
+            // Free allocated memory
+             bridgeOS << "\n        // Free allocated memory for parameters\n";
+             bridgeOS << "        for (int i = 0; i < alloc_count; ++i) {\n";
+             bridgeOS << "           if (allocations[i]) free(allocations[i]);\n";
+             bridgeOS << "        }\n";
+
+        }
+
+        if (!g_functions.empty()) {
+            bridgeOS << "    }\n"; // Close the last else if block
+        }
+
+        bridgeOS << "\n    return result;\n";
+        bridgeOS << "}\n\n";
+
+        bridgeOS.flush();
+    }
+
+     // Generate the includes and boilerplate for the bridge file
+    void generateBridgeFileBoilerplate() {
+        bridgeOS << "// 桥接代码 (自动生成，请勿修改)\n";
+        bridgeOS << "#include \"cJSON.h\"\n";
+        bridgeOS << "#include <string.h>\n";
+        bridgeOS << "#include <stdlib.h>\n";
+        bridgeOS << "#include <stdio.h> // For NULL, potentially error messages\n";
+        // Include necessary C headers (struct/enum definitions)
+        for(const std::string& include : g_requiredIncludes) {
+             bridgeOS << "#include \"" << include << "\"\n";
+        }
+        bridgeOS << "\n";
+
+        bridgeOS << "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n";
+
+        // External function declarations
+        bridgeOS << "// --- External Function Declarations --- \n";
+        for (const auto& funcDef : g_functions) {
+             bridgeOS << "extern " << funcDef.returnType.getAsString() << " " << funcDef.originalName << "(";
+             for (size_t i = 0; i < funcDef.parameters.size(); ++i) {
+                 bridgeOS << (i > 0 ? ", " : "") << funcDef.parameters[i].type.getAsString() << " " << funcDef.parameters[i].name;
+             }
+             bridgeOS << ");\n";
+        }
+        bridgeOS << "\n";
+    }
+
+     void finalizeBridgeFile() {
+        bridgeOS << "\n#ifdef __cplusplus\n} // extern \"C\"\n#endif\n";
+        bridgeOS.flush();
+     }
+
+
+public:
+    ExportASTConsumer(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_)
+        : sigOS(sigOS_), bridgeOS(bridgeOS_), Context(nullptr) {}
+
+    void HandleTranslationUnit(ASTContext &Ctx) override {
+        Context = &Ctx; // Store context
+
+         // Store the header file name derived from the main source file
+         SourceManager &SM = Ctx.getSourceManager();
+         FileID MainFileID = SM.getMainFileID();
+         const FileEntry *MainFile = SM.getFileEntryForID(MainFileID);
+         if (MainFile) {
+            StringRef MainFileName = MainFile->tryGetRealPathName();
+             if (!MainFileName.empty()) {
+                 std::string headerPath = MainFileName.str();
+                 size_t last_dot = headerPath.rfind('.');
+                 if (last_dot != std::string::npos) {
+                     headerPath.replace(last_dot, headerPath.length() - last_dot, ".h");
+                     // Get just the filename part for include statement
+                     size_t last_slash = headerPath.find_last_of("/\\");
+                      if (last_slash != std::string::npos) {
+                          inputHeaderFile = headerPath.substr(last_slash + 1);
+                      } else {
+                          inputHeaderFile = headerPath;
+                      }
+                      g_requiredIncludes.insert(inputHeaderFile); // Add to includes
+                      errs() << "Detected input header: " << inputHeaderFile << "\n";
+                 }
+             }
+         }
+
+
+        // AST Traversal is done implicitly by Clang before this point
+        // Match results are collected in the MatchFinder callbacks
+
+        // Now generate the output files based on collected data
+        errs() << "Generating output files...\n";
+        errs() << "Found " << g_enums.size() << " enums, "
+               << g_structs.size() << " structs, "
+               << g_functions.size() << " functions.\n";
+
+        // Generate Signatures/Defs File (`generated_function_signatures.c`)
+        generateSignaturesAndDefsFile();
+
+        // Generate Bridge File (`generated_bridge_code.c`)
+        generateBridgeFileBoilerplate();
+        // Generate parsers first as they are needed by the main bridge function
+        for (const auto& [exportName, enumDef] : g_enums) {
+            generateEnumParser(enumDef);
+        }
+        for (const auto& [exportName, structDef] : g_structs) {
+            generateStructParser(structDef);
+        }
+        generateBridgeFunction();
+        finalizeBridgeFile();
+
+        errs() << "Output file generation complete.\n";
     }
 };
 
+// --- MatchFinder Callback Implementation ---
+class ExportMatcher : public MatchFinder::MatchCallback {
+     ASTContext *Context;
+public:
+     void run(const MatchFinder::MatchResult &Result) override {
+         Context = Result.Context; // Capture context on first match
+
+         // --- Enum Parsing (Task 1.3) ---
+         if (const EnumDecl *ED = Result.Nodes.getNodeAs<EnumDecl>("enumDecl")) {
+             if (ED->isThisDeclarationADefinition()) {
+                 std::string exportName = getAnnotationValue(ED, "EXPORT_AS=");
+                 bool isExported = ED->hasAttr<AnnotateAttr>() && getAnnotationValue(ED, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
+
+                 if (!exportName.empty() || isExported) {
+                     if (exportName.empty()) {
+                         exportName = ED->getNameAsString(); // 如果没有 EXPORT_AS,使用枚举名
+                     }
+                     if (g_enums.count(exportName)) return; // Already processed
+                     errs() << "Processing Enum: " << ED->getNameAsString() << " (Exported As: " << exportName << ")\n";
+                     EnumDefinition enumDef;
+                     enumDef.exportName = exportName;
+                     enumDef.originalName = ED->getNameAsString(); // Store original name
+                     enumDef.description = getAnnotationValue(ED, "DESCRIPTION=");
+                     enumDef.underlyingType = ED->getIntegerType();
+
+                     for (const EnumConstantDecl *ECD : ED->enumerators()) {
+                         EnumConstantInfo constantInfo;
+                         constantInfo.name = ECD->getNameAsString();
+                         // constantInfo.value = ECD->getInitVal().getSExtValue(); // If value needed
+                         enumDef.constants.push_back(constantInfo);
+                     }
+                     g_enums[exportName] = enumDef;
+
+                     // Add header where this enum is defined
+                     SourceManager &SM = Context->getSourceManager();
+                     std::string header = SM.getFilename(ED->getLocation()).str();
+                     size_t last_slash = header.find_last_of("/\\");
+                     if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
+                     if (!header.empty()) g_requiredIncludes.insert(header);
+
+                 }
+             }
+         }
+         // --- Struct Parsing (Task 1.4) ---
+         else if (const RecordDecl *RD = Result.Nodes.getNodeAs<RecordDecl>("structDecl")) {
+              if (RD->isStruct() && RD->isThisDeclarationADefinition()) { // Ensure it's a struct definition
+                 std::string exportName = getAnnotationValue(RD, "EXPORT_AS=");
+                 bool isExported = RD->hasAttr<AnnotateAttr>() && getAnnotationValue(RD, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
+
+                 if (!exportName.empty() || isExported) {
+                     if (exportName.empty()) {
+                         exportName = RD->getNameAsString(); // 如果没有 EXPORT_AS,使用结构体名
+                     }
+                     if (g_structs.count(exportName)) return; // Already processed
+                     errs() << "Processing Struct: " << RD->getNameAsString() << " (Exported As: " << exportName << ")\n";
+                     StructDefinition structDef;
+                     structDef.exportName = exportName;
+                     // Get original name carefully, might be anonymous or typedef'd
+                     if (RD->getIdentifier()) {
+                         structDef.originalName = RD->getNameAsString();
+                     } else {
+                         // Try to find a typedef name pointing to this anonymous struct
+                         // This requires more advanced AST walking or tracking typedefs
+                         // For now, use a placeholder or try to construct one
+                         structDef.originalName = exportName + "_struct"; // Placeholder
+                         errs() << "Warning: Anonymous struct exported as " << exportName << ". Using placeholder C name.\n";
+                     }
+
+                     // Check for struct typedef like `typedef struct Person { ... } Person;`
+                     // The RecordDecl might not have the name "Person", the TypedefDecl does.
+                     // Need a way to link them. A common pattern is the typedef name matches the EXPORT_AS name.
+                     // Let's assume the originalName *is* the typedef name if the struct tag is missing
+                     // and adjust the struct definition name in the parser generation accordingly.
+                       // A more robust approach involves matching TypedefDecls as well.
+                       // For simplicity now: If struct has no tag name, assume typedef name = exportName exists.
+                      if (!RD->getIdentifier() && RD->getTypedefNameForAnonDecl()) {
+                         structDef.originalName = RD->getTypedefNameForAnonDecl()->getNameAsString();
+                         errs() << "Info: Found typedef name '" << structDef.originalName << "' for anonymous struct exported as " << exportName << "\n";
+                      } else if (!RD->getIdentifier()) {
+                           // If still no name, stick to placeholder
+                          errs() << "Warning: Could not definitively determine original C name for anonymous struct exported as " << exportName << "\n";
+                      }
+
+
+                      structDef.description = getAnnotationValue(RD, "DESCRIPTION=");
+
+                      for (const FieldDecl *FD : RD->fields()) {
+                          FieldInfo fieldInfo;
+                          fieldInfo.name = FD->getNameAsString();
+                          fieldInfo.description = getAnnotationValue(FD, "DESCRIPTION=");
+                          fieldInfo.type = FD->getType();
+                          structDef.fields.push_back(fieldInfo);
+                      }
+                      g_structs[exportName] = structDef;
+
+                       // Add header where this struct is defined
+                     SourceManager &SM = Context->getSourceManager();
+                     std::string header = SM.getFilename(RD->getLocation()).str();
+                     size_t last_slash = header.find_last_of("/\\");
+                     if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
+                     if (!header.empty()) g_requiredIncludes.insert(header);
+                 }
+              }
+         }
+        // --- Function Parsing (Task 1.5) ---
+        else if (const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("exportedFunction")) {
+            if (!FD->isThisDeclarationADefinition()) return; // Only process definitions
+
+            std::string exportName = getAnnotationValue(FD, "EXPORT_AS=");
+            bool isExported = FD->hasAttr<AnnotateAttr>() && getAnnotationValue(FD, "EXPORT") == "EXPORT"; // Check for EXPORT annotation specifically
+
+            if (!exportName.empty() || isExported) {
+                 if (exportName.empty()) {
+                     exportName = FD->getNameAsString(); // Use function name if EXPORT but no EXPORT_AS
+                 }
+
+                // Avoid duplicates if run multiple times? (Less likely with tool setup)
+                // Check if already processed? Need a unique key. exportName should work.
+                bool found = false;
+                for(const auto& f : g_functions) { if (f.exportName == exportName) { found = true; break; } }
+                if(found) return;
+
+                errs() << "Processing Function: " << FD->getNameAsString() << " (Exported As: " << exportName << ")\n";
+
+                FunctionDefinition funcDef;
+                funcDef.exportName = exportName;
+                funcDef.originalName = FD->getNameAsString();
+                funcDef.description = getAnnotationValue(FD, "DESCRIPTION=");
+                funcDef.returnType = FD->getReturnType();
+
+                for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+                    const ParmVarDecl *PVD = FD->getParamDecl(i);
+                    ParameterInfo paramInfo;
+                    paramInfo.name = PVD->getNameAsString();
+                     if (paramInfo.name.empty()) {
+                         // Handle unnamed parameters if necessary, e.g., generate "param1", "param2"
+                         paramInfo.name = "param" + std::to_string(i + 1);
+                         errs() << "Warning: Unnamed parameter found in function " << funcDef.originalName << ", using generated name '" << paramInfo.name << "'\n";
+                     }
+                    paramInfo.description = getAnnotationValue(PVD, "DESCRIPTION=");
+                    paramInfo.type = PVD->getType();
+                    // paramInfo.isRequired = !PVD->hasDefaultArg(); // If default args are supported
+                    funcDef.parameters.push_back(paramInfo);
+                }
+                 g_functions.push_back(funcDef);
+
+                   // Add header where this function is defined
+                 SourceManager &SM = Context->getSourceManager();
+                 std::string header = SM.getFilename(FD->getLocation()).str();
+                 size_t last_slash = header.find_last_of("/\\");
+                 if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
+                 if (!header.empty()) g_requiredIncludes.insert(header);
+            }
+        }
+     }
+};
+
+
+// --- Frontend Action ---
+class ExportAction : public ASTFrontendAction {
+     raw_fd_ostream &sigOS;
+     raw_fd_ostream &bridgeOS;
+     ExportMatcher MatcherCallback; // Matcher needs to live long enough
+     MatchFinder Finder;
+public:
+    ExportAction(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_) : sigOS(sigOS_), bridgeOS(bridgeOS_) {
+         // Define Matchers
+         Finder.addMatcher(
+             enumDecl(
+                 hasAttr(attr::Annotate), // Check for EXPORT_AS inside callback
+                 isDefinition()           // Process definitions only
+             ).bind("enumDecl"),
+             &MatcherCallback
+         );
+          Finder.addMatcher(
+             recordDecl(
+                 isStruct(),               // Match structs (or isUnion(), isClass())
+                 hasAttr(attr::Annotate), // Check for EXPORT_AS inside callback
+                 isDefinition()
+             ).bind("structDecl"),
+             &MatcherCallback
+         );
+         Finder.addMatcher(
+             functionDecl(
+                 hasAttr(attr::Annotate), // Check for EXPORT or EXPORT_AS inside callback
+                 isDefinition()
+             ).bind("exportedFunction"),
+             &MatcherCallback
+         );
+    }
+
+    std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI, StringRef InFile) override {
+        Finder.matchAST(CI.getASTContext()); // Run the finder here after AST is built
+        // The consumer itself does the final generation after traversal
+        return std::make_unique<ExportASTConsumer>(sigOS, bridgeOS);
+    }
+};
+
+// 添加 ExportActionFactory 类定义
+class ExportActionFactory : public FrontendActionFactory {
+    raw_fd_ostream &sigOS;
+    raw_fd_ostream &bridgeOS;
+public:
+    ExportActionFactory(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_)
+        : sigOS(sigOS_), bridgeOS(bridgeOS_) {}
+
+    std::unique_ptr<FrontendAction> create() override {
+        return std::make_unique<ExportAction>(sigOS, bridgeOS);
+    }
+};
+
+// --- Main Function ---
 int main(int argc, const char **argv) {
-    auto ExpParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
-    if (!ExpParser) {
-        errs() << toString(ExpParser.takeError()) << "\n";
-        return 1;
-    }
+     // Use CommonOptionsParser::create
+     auto ExpectedParser = CommonOptionsParser::create(argc, argv, MyToolCategory);
+     if (!ExpectedParser) {
+         errs() << toString(ExpectedParser.takeError());
+         return 1;
+     }
+     CommonOptionsParser& OptionsParser = ExpectedParser.get();
 
-    // 检查输出文件参数
-    if (SigOutputFilename.empty() || BridgeOutputFilename.empty()) {
-        errs() << "必须指定两个输出文件: -s 和 -b\n";
-        return 1;
-    }
 
-    // 打开输出文件
+    // Command line options already checked for requirement by cl::Required
+
+    // Open output files
     std::error_code EC;
-    raw_fd_ostream sigOS(SigOutputFilename, EC, sys::fs::OF_Text);
-    raw_fd_ostream bridgeOS(BridgeOutputFilename, EC, sys::fs::OF_Text);
-    
-    // 初始化匹配器
-    MatchFinder finder;
-    
-    // 结构体解析
-    StructParser structParser(bridgeOS, sigOS);
-    finder.addMatcher(
-        recordDecl(
-            allOf(
-                isStruct(),
-                hasAttr(attr::Annotate)
-            )
-        ).bind("structDecl"),
-        &structParser
-    );
-    finder.addMatcher(
-        functionDecl(hasAttr(attr::Annotate)).bind("exportedFunction"),
-        &structParser
-    );
-    
-    // 使用自定义的 FrontendAction
-    ClangTool tool(ExpParser->getCompilations(), ExpParser->getSourcePathList());
+    raw_fd_ostream sigOS(SigOutputFilename, EC, llvm::sys::fs::OF_Text);
+    if (EC) {
+        errs() << "Error opening signature file " << SigOutputFilename << ": " << EC.message() << "\n";
+        return 1;
+    }
+    raw_fd_ostream bridgeOS(BridgeOutputFilename, EC, llvm::sys::fs::OF_Text);
+     if (EC) {
+        errs() << "Error opening bridge file " << BridgeOutputFilename << ": " << EC.message() << "\n";
+        return 1;
+    }
+
+    // Create and run the tool
+    ClangTool Tool(OptionsParser.getCompilations(), OptionsParser.getSourcePathList());
+
+    // Add specific flags if needed (e.g., include paths, defines)
+    // Tool.appendArgumentsAdjuster(getInsertArgumentAdjuster("-I/path/to/includes", ArgumentInsertPosition::BEGIN));
+
+    // Use the custom FrontendActionFactory
+    auto factory = std::make_unique<ExportActionFactory>(sigOS, bridgeOS);
+    int i=0;
+
 #ifdef _MSC_VER
-    tool.appendArgumentsAdjuster(
+    Tool.appendArgumentsAdjuster(
         getInsertArgumentAdjuster("-U_MSC_VER", ArgumentInsertPosition::BEGIN)
     );
 #endif
-    int result = tool.run(newFrontendActionFactory(&finder).get());
+    int result = Tool.run(factory.get());
+    // Close streams (happens automatically on destruction, but explicit flush is good)
+    sigOS.flush();
+    bridgeOS.flush();
 
     return result;
 }

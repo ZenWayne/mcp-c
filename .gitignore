@@ -47,6 +47,7 @@ build/
 
 tmp/
 vcenv.bat
+build.bat
 # 其他常见忽略文件
 *.log
 *.tlog
