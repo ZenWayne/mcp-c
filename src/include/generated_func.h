@@ -9,6 +9,8 @@ extern "C" {
 
 cJSON* get_all_function_signatures_json();
 
+cJSON* bridge(cJSON* input_json);
+
 #ifdef __cplusplus
 }
 #endif

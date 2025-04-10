@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.15)
 set(LLVM_ENABLE_DIA_SDK OFF)
 project(MCPC)
 
-
 # 添加自定义模块路径
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
 
@@ -16,6 +15,8 @@ set(PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 # 添加项目的include目录
 include_directories(${PROJECT_SOURCE_DIR}/src/include)
 include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server)
+include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server/base)
+include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server/filesystems)
 
 # 递归查找所有子目录并添加到包含路径
 file(GLOB_RECURSE MCP_SERVER_DIRS LIST_DIRECTORIES true ${PROJECT_SOURCE_DIR}/src/mcp_server/*)
@@ -65,8 +66,8 @@ set(COMPILE_COMMANDS_JSON "${CMAKE_BINARY_DIR}/compile_commands.json")
 
 message(STATUS "CMAKE_BINARY_DIR: ${CMAKE_BINARY_DIR}")
 
-add_executable(extract_signatures ${PROJECT_SOURCE_DIR}/src/export.cpp)
-target_link_libraries(extract_signatures PRIVATE clangTooling clangASTMatchers clangFrontend clangDriver clangBasic)
+add_executable(export ${PROJECT_SOURCE_DIR}/src/export.cpp)
+target_link_libraries(export PRIVATE clangTooling clangASTMatchers clangFrontend clangDriver clangBasic)
 
 # 打印调试信息
 message(STATUS "MCP_SERVER_DIRS: ${MCP_SERVER_DIRS}")
@@ -83,15 +84,16 @@ message(STATUS "INCLUDE_ARGS: ${INCLUDE_ARGS}")
 add_custom_command(
     OUTPUT ${FUNCTION_SIGNATURES_OUTPUT} ${BRIDGE_CODE_OUTPUT}
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
-    COMMAND $<TARGET_FILE:extract_signatures> 
+    COMMAND $<TARGET_FILE:export> 
             -p "${CMAKE_BINARY_DIR}" 
             ${MCP_SERVER_SOURCES} 
             -s ${FUNCTION_SIGNATURES_OUTPUT} 
             -b ${BRIDGE_CODE_OUTPUT}
             -- -I${PROJECT_SOURCE_DIR}/src/include 
             -I${CMAKE_CURRENT_SOURCE_DIR}/cJSON 
-            -I${PROJECT_SOURCE_DIR}/mcp_server/filesystems
-    DEPENDS ${MCP_SERVER_SOURCES} extract_signatures ${COMPILE_COMMANDS_JSON}
+            -I${PROJECT_SOURCE_DIR}/src/mcp_server
+            -I${PROJECT_SOURCE_DIR}/src/mcp_server/filesystems
+    DEPENDS ${MCP_SERVER_SOURCES} export ${COMPILE_COMMANDS_JSON}
     VERBATIM
 )
 

@@ -1,7 +1,12 @@
 #include "export_macro.h"
 #include <stdbool.h>
+#include "cJSON.h"
 
-typedef enum EXPORT_AS(color) {
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum EXPORT COLOR {
     RED,
     GREEN,
     BLUE
@@ -12,9 +17,15 @@ typedef struct EXPORT_AS(cloth) cloth {
     int size;
 } cloth;
 
-typedef struct EXPORT_AS(person) person {
+typedef struct EXPORT person {
     bool isMale DES("whether is male or not male is true");
     int age DES("age of the person");
     char* name;
     cloth wearing_cloths;
 } person;
+
+
+
+#ifdef __cplusplus
+}
+#endif

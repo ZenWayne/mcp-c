@@ -113,6 +113,17 @@ std::string getAnnotationValue(const clang::Decl* D, const std::string& annotati
     return "";
 }
 
+std::string getExportName(const clang::NamedDecl* D) {
+    std::string exportName = "";
+    if(D->hasAttr<AnnotateAttr>()) {
+        exportName = getAnnotationValue(D, "EXPORT_AS=");
+        if(exportName.empty()) {
+            exportName = D->getNameAsString();
+        }
+    }
+    return exportName;
+}
+
 // --- Type Analysis & JSON Schema Generation Helper (Task 2.1 refinement) ---
 struct JsonSchemaInfo {
     std::string type; // "integer", "string", "boolean", "number", "object", "array"
@@ -174,7 +185,7 @@ JsonSchemaInfo getJsonSchemaInfoForType(QualType qualType, ASTContext& context) 
         } else if (const clang::RecordType* recordType = pointeeTypePtr->getAs<clang::RecordType>()) {
              const clang::RecordDecl* recordDecl = recordType->getDecl();
              if (recordDecl->isStruct() || recordDecl->isClass()) { // isClass for C++ structs
-                 std::string exportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+                 std::string exportName = getExportName(recordDecl);
                  if (!exportName.empty() && g_structs.count(exportName)) {
                      schema.ref = "#/$defs/" + exportName;
                  } else {
@@ -192,34 +203,32 @@ JsonSchemaInfo getJsonSchemaInfoForType(QualType qualType, ASTContext& context) 
         }
     } else if (const EnumType* enumType = type->getAs<EnumType>()) {
         const EnumDecl* enumDecl = enumType->getDecl();
-        std::string exportName = getAnnotationValue(enumDecl, "EXPORT_AS=");
-        bool isExported = enumDecl->hasAttr<AnnotateAttr>() && getAnnotationValue(enumDecl, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
-         if (!exportName.empty() || isExported) {
-             if (exportName.empty()) {
-                 exportName = enumDecl->getNameAsString(); // 如果没有 EXPORT_AS,使用枚举名
-             }
-             if (g_enums.count(exportName)) return schema; // Already processed
+        std::string exportName = getExportName(enumDecl);
+        errs() << "enumDecl: " << enumDecl->getNameAsString() << " " << "exportName: " << exportName << 
+        " " << "g_enums.count(exportName): " << g_enums.count(exportName) << "\n";
+        schema.type = "integer"; // Not mather what, type is always int
+        if (!exportName.empty() && g_enums.count(exportName)) {
+             errs() << "g_enums.count(exportName): " << g_enums.count(exportName) << "\n";
              schema.ref = "#/$defs/" + exportName;
+             errs() << "enum ref: " << schema.ref << "\n";
              schema.isEnum = true; // Mark it, although ref takes precedence in schema
              schema.enumExportName = exportName;
          } else {
-             // Fallback: Treat as integer if no export name found
-             schema.type = "integer";
              errs() << "Warning: Enum type '" << qualType.getAsString() << "' has no EXPORT_AS annotation. Defaulting to integer.\n";
          }
     } else if (const RecordType* recordType = type->getAs<RecordType>()) {
         // Struct passed by value
          const RecordDecl* recordDecl = recordType->getDecl();
+         schema.type = "object"; // Not mather what, type is always object
          if (recordDecl->isStruct() || recordDecl->isClass()) {
-             std::string exportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+             std::string exportName = getExportName(recordDecl);
+
              if (!exportName.empty() && g_structs.count(exportName)) {
                  schema.ref = "#/$defs/" + exportName;
              } else {
-                  schema.type = "object"; // Fallback
                   errs() << "Warning: Struct '" << qualType.getAsString() << "' passed by value is not exported/known. Defaulting to object.\n";
              }
          } else {
-             schema.type = "object"; // Fallback
              errs() << "Warning: Unsupported record type '" << qualType.getAsString() << "' passed by value. Defaulting to object.\n";
          }
     } else if (type->isArrayType()) {
@@ -242,6 +251,149 @@ JsonSchemaInfo getJsonSchemaInfoForType(QualType qualType, ASTContext& context) 
     return schema;
 }
 
+// --- MatchFinder Callback Implementation ---
+class ExportMatcher : public MatchFinder::MatchCallback {
+     ASTContext *Context;
+public:
+        void check_and_add_header(const clang::Decl* ED)
+        {
+            // Add header where this enum is defined
+            SourceManager &SM = Context->getSourceManager();
+            std::string header = SM.getFilename(ED->getLocation()).str();
+            size_t last_slash = header.find_last_of("/\\");
+            if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
+            if (header.find(".h")!=std::string::npos
+                    ||header.find(".hpp")!=std::string::npos
+                )
+                g_requiredIncludes.insert(header);
+        }
+     void run(const MatchFinder::MatchResult &Result) override {
+         Context = Result.Context; // Capture context on first match
+        errs() << "ExportMatcher.run\n";
+         // --- Enum Parsing (Task 1.3) ---
+         if (const EnumDecl *ED = Result.Nodes.getNodeAs<EnumDecl>("enumDecl")) {
+             if (ED->isThisDeclarationADefinition()) {
+                 std::string exportName = getExportName(ED);
+                 if (!exportName.empty()) {
+                     if (g_enums.count(exportName)) return; // Already processed
+                     errs() << "Processing Enum: " << ED->getNameAsString() << " (Exported As: " << exportName << ")\n";
+                     EnumDefinition enumDef;
+                     enumDef.exportName = exportName;
+                     enumDef.originalName = ED->getNameAsString(); // Store original name
+                     enumDef.description = getAnnotationValue(ED, "DESCRIPTION=");
+                     enumDef.underlyingType = ED->getIntegerType();
+
+                     for (const EnumConstantDecl *ECD : ED->enumerators()) {
+                         EnumConstantInfo constantInfo;
+                         constantInfo.name = ECD->getNameAsString();
+                         // constantInfo.value = ECD->getInitVal().getSExtValue(); // If value needed
+                         enumDef.constants.push_back(constantInfo);
+                     }
+                     g_enums[exportName] = enumDef;
+
+                     check_and_add_header(ED);
+                 }
+             }
+         }
+         // --- Struct Parsing (Task 1.4) ---
+         else if (const RecordDecl *RD = Result.Nodes.getNodeAs<RecordDecl>("structDecl")) {
+              if (RD->isStruct() && RD->isThisDeclarationADefinition()) { // Ensure it's a struct definition
+                 std::string exportName = getExportName(RD);
+                 if (!exportName.empty()) {
+                     if (g_structs.count(exportName)) return; // Already processed
+                     errs() << "Processing Struct: " << RD->getNameAsString() << " (Exported As: " << exportName << ")\n";
+                     StructDefinition structDef;
+                     structDef.exportName = exportName;
+                     // Get original name carefully, might be anonymous or typedef'd
+                     if (RD->getIdentifier()) {
+                         structDef.originalName = RD->getNameAsString();
+                     } else {
+                         // Try to find a typedef name pointing to this anonymous struct
+                         // This requires more advanced AST walking or tracking typedefs
+                         // For now, use a placeholder or try to construct one
+                         structDef.originalName = exportName + "_struct"; // Placeholder
+                         errs() << "Warning: Anonymous struct exported as " << exportName << ". Using placeholder C name.\n";
+                     }
+
+                     // Check for struct typedef like `typedef struct Person { ... } Person;`
+                     // The RecordDecl might not have the name "Person", the TypedefDecl does.
+                     // Need a way to link them. A common pattern is the typedef name matches the EXPORT_AS name.
+                     // Let's assume the originalName *is* the typedef name if the struct tag is missing
+                     // and adjust the struct definition name in the parser generation accordingly.
+                       // A more robust approach involves matching TypedefDecls as well.
+                       // For simplicity now: If struct has no tag name, assume typedef name = exportName exists.
+                      if (!RD->getIdentifier() && RD->getTypedefNameForAnonDecl()) {
+                         structDef.originalName = RD->getTypedefNameForAnonDecl()->getNameAsString();
+                         errs() << "Info: Found typedef name '" << structDef.originalName << "' for anonymous struct exported as " << exportName << "\n";
+                      } else if (!RD->getIdentifier()) {
+                           // If still no name, stick to placeholder
+                          errs() << "Warning: Could not definitively determine original C name for anonymous struct exported as " << exportName << "\n";
+                      }
+
+
+                      structDef.description = getAnnotationValue(RD, "DESCRIPTION=");
+
+                      for (const FieldDecl *FD : RD->fields()) {
+                          FieldInfo fieldInfo;
+                          fieldInfo.name = FD->getNameAsString();
+                          fieldInfo.description = getAnnotationValue(FD, "DESCRIPTION=");
+                          fieldInfo.type = FD->getType();
+                          structDef.fields.push_back(fieldInfo);
+                      }
+                      g_structs[exportName] = structDef;
+
+                     check_and_add_header(RD);
+                 }
+              }
+         }
+        // --- Function Parsing (Task 1.5) ---
+        else if (const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("exportedFunction")) {
+            if (!FD->isThisDeclarationADefinition()) return; // Only process definitions
+
+            std::string exportName = getAnnotationValue(FD, "EXPORT_AS=");
+            bool isExported = FD->hasAttr<AnnotateAttr>() && getAnnotationValue(FD, "EXPORT") == "EXPORT"; // Check for EXPORT annotation specifically
+
+            if (!exportName.empty() || isExported) {
+                 if (exportName.empty()) {
+                     exportName = FD->getNameAsString(); // Use function name if EXPORT but no EXPORT_AS
+                 }
+
+                // Avoid duplicates if run multiple times? (Less likely with tool setup)
+                // Check if already processed? Need a unique key. exportName should work.
+                bool found = false;
+                for(const auto& f : g_functions) { if (f.exportName == exportName) { found = true; break; } }
+                if(found) return;
+
+                errs() << "Processing Function: " << FD->getNameAsString() << " (Exported As: " << exportName << ")\n";
+
+                FunctionDefinition funcDef;
+                funcDef.exportName = exportName;
+                funcDef.originalName = FD->getNameAsString();
+                funcDef.description = getAnnotationValue(FD, "DESCRIPTION=");
+                funcDef.returnType = FD->getReturnType();
+
+                for (unsigned i = 0; i < FD->getNumParams(); ++i) {
+                    const ParmVarDecl *PVD = FD->getParamDecl(i);
+                    ParameterInfo paramInfo;
+                    paramInfo.name = PVD->getNameAsString();
+                     if (paramInfo.name.empty()) {
+                         // Handle unnamed parameters if necessary, e.g., generate "param1", "param2"
+                         paramInfo.name = "param" + std::to_string(i + 1);
+                         errs() << "Warning: Unnamed parameter found in function " << funcDef.originalName << ", using generated name '" << paramInfo.name << "'\n";
+                     }
+                    paramInfo.description = getAnnotationValue(PVD, "DESCRIPTION=");
+                    paramInfo.type = PVD->getType();
+                    // paramInfo.isRequired = !PVD->hasDefaultArg(); // If default args are supported
+                    funcDef.parameters.push_back(paramInfo);
+                }
+                 g_functions.push_back(funcDef);
+
+                 check_and_add_header(FD);
+            }
+        }
+     }
+};
+
 // --- Clang AST Consumer and Matcher Callback ---
 
 class ExportASTConsumer : public ASTConsumer {
@@ -250,6 +402,8 @@ class ExportASTConsumer : public ASTConsumer {
     raw_fd_ostream &bridgeOS; // For generated_bridge_code.c
     std::string inputHeaderFile; // Store the main header file name
 
+     ExportMatcher MatcherCallback; // Matcher needs to live long enough
+     MatchFinder Finder;
 
     // Helper to get the unqualified original type name (e.g., "person" from "struct person")
     std::string getBaseTypeName(QualType qt) {
@@ -301,6 +455,7 @@ class ExportASTConsumer : public ASTConsumer {
 
      // Generate the `get_all_function_signatures_json` function (Tasks 2.2, 2.3)
     void generateSignaturesAndDefsFile() {
+        errs() << "Generating signatures and defs file\n";
         sigOS << "// 函数签名 JSON 生成代码 (自动生成，请勿修改)\n";
         sigOS << "#include \"cJSON.h\"\n";
         sigOS << "#include \"string.h\" // For strcmp in potential enum parsing fallback\n\n";
@@ -490,7 +645,7 @@ class ExportASTConsumer : public ASTConsumer {
              sigOS << "                     cJSON_AddItemToObject(tool, \"inputSchema\", inputSchema);\n";
              sigOS << "                 }\n";
             sigOS << "            } // end if inputSchema\n";
-             sigOS << "            if (inputSchema) { // Only add tool if input schema was successful";
+             sigOS << "            if (inputSchema) { // Only add tool if input schema was successful\n";
                  sigOS << "               cJSON_AddItemToArray(tools, tool);\n";
              sigOS << "            } else { cJSON_Delete(tool); } // Clean up tool if schema failed\n";
             sigOS << "        } // end if tool\n";
@@ -546,10 +701,11 @@ class ExportASTConsumer : public ASTConsumer {
         bridgeOS << "    struct " << structDef.originalName << "* obj = (struct " << structDef.originalName << "*)malloc(sizeof(struct " << structDef.originalName << "));\n";
         bridgeOS << "    if (!obj) return NULL;\n";
         bridgeOS << "    memset(obj, 0, sizeof(struct " << structDef.originalName << ")); // Initialize memory\n\n";
-
+        bridgeOS << "    cJSON* field_json = NULL;\n";
         for (const auto& field : structDef.fields) {
             bridgeOS << "    // Field: " << field.name << "\n";
-            bridgeOS << "    cJSON* field_json = cJSON_GetObjectItem(json, \"" << field.name << "\");\n";
+
+            bridgeOS << "    field_json = cJSON_GetObjectItem(json, \"" << field.name << "\");\n";
             bridgeOS << "    if (field_json && !cJSON_IsNull(field_json)) { // Check field exists and is not null\n";
 
             QualType fieldType = field.type.getCanonicalType();
@@ -648,10 +804,10 @@ class ExportASTConsumer : public ASTConsumer {
         bridgeOS << "    void* allocations[MAX_ALLOCS];\n";
         bridgeOS << "    int alloc_count = 0;\n\n";
 
-
+        bridgeOS << "    if (0) {\n";
         for (size_t i = 0; i < g_functions.size(); ++i) {
             const auto& funcDef = g_functions[i];
-            bridgeOS << "    " << (i > 0 ? "} else " : "") << "if (strcmp(func_name, \"" << funcDef.exportName << "\") == 0) {\n";
+            bridgeOS << "    } else if (strcmp(func_name, \"" << funcDef.exportName << "\") == 0) {\n";
             // Declare parameter variables
             for (const auto& param : funcDef.parameters) {
                 // Use original C type name for variable declaration
@@ -662,10 +818,11 @@ class ExportASTConsumer : public ASTConsumer {
             // Parse parameters
              bridgeOS << "        // Parse parameters\n";
             bool parsing_ok = true; // Simple flag for now
+            bridgeOS << "        cJSON* p_json = NULL;\n";
             for (const auto& param : funcDef.parameters) {
-                bridgeOS << "        cJSON* p_json = cJSON_GetObjectItem(param_item, \"" << param.name << "\");\n";
+                bridgeOS << "        p_json = cJSON_GetObjectItem(param_item, \"" << param.name << "\");\n";
                 // TODO: Add check if parameter is required and p_json is NULL
-                bridgeOS << "        if (p_json && !cJSON_IsNull(p_json)) {\n";
+                bridgeOS << "        if (p_json && !cJSON_IsNull(p_json)&& alloc_count < MAX_ALLOCS) {\n";
 
                  QualType paramType = param.type.getCanonicalType();
                  const clang::Type* typePtr = paramType.getTypePtr();
@@ -675,7 +832,7 @@ class ExportASTConsumer : public ASTConsumer {
                       if (schema.type == "string") {
                           bridgeOS << "            if (cJSON_IsString(p_json)) {\n";
                            bridgeOS << "                p_" << param.name << " = strdup(p_json->valuestring);\n";
-                           bridgeOS << "                if (p_" << param.name << " && alloc_count < MAX_ALLOCS) allocations[alloc_count++] = p_" << param.name << ";\n"; // Track allocation
+                           bridgeOS << "                if (p_" << param.name << " ) allocations[alloc_count++] = p_" << param.name << ";\n"; // Track allocation
                            bridgeOS << "            }\n";
                       } else if (schema.type == "integer") {
                            bridgeOS << "            if (cJSON_IsNumber(p_json)) p_" << param.name << " = p_json->valueint;\n";
@@ -685,7 +842,7 @@ class ExportASTConsumer : public ASTConsumer {
                            bridgeOS << "            if (cJSON_IsNumber(p_json)) p_" << param.name << " = p_json->valuedouble;\n";
                       }
                  } else if (const EnumType* enumType = typePtr->getAs<EnumType>()) {
-                      std::string enumExportName = getAnnotationValue(enumType->getDecl(), "EXPORT_AS=");
+                      std::string enumExportName = getExportName(enumType->getDecl());
                       if (!enumExportName.empty()) {
                           bridgeOS << "            p_" << param.name << " = parse_" << enumExportName << "(p_json);\n";
                       }
@@ -693,7 +850,7 @@ class ExportASTConsumer : public ASTConsumer {
                      // Pointer to struct
                      QualType pointeeType = typePtr->getPointeeType();
                       const RecordDecl* recordDecl = pointeeType.getCanonicalType()->getAs<RecordType>()->getDecl();
-                      std::string structExportName = getAnnotationValue(recordDecl, "EXPORT_AS=");
+                      std::string structExportName = getExportName(recordDecl);
                       if (!structExportName.empty()) {
                           bridgeOS << "            p_" << param.name << " = parse_" << structExportName << "(p_json);\n";
                            bridgeOS << "           if (p_" << param.name << " && alloc_count < MAX_ALLOCS) allocations[alloc_count++] = p_" << param.name << ";\n"; // Track allocation
@@ -707,6 +864,7 @@ class ExportASTConsumer : public ASTConsumer {
 
                 bridgeOS << "        } else {\n";
                  bridgeOS << "           // Parameter " << param.name << " missing or null\n";
+                 bridgeOS << "           fprintf(stderr, \"Parameter "<<param.name<<" missing or null\");\n";
                  // TODO: Check if required, set parsing_ok = false if so
                  bridgeOS << "        }\n";
             }
@@ -719,14 +877,13 @@ class ExportASTConsumer : public ASTConsumer {
                 bridgeOS << (p_idx > 0 ? ", " : "") << "p_" << funcDef.parameters[p_idx].name;
             }
             bridgeOS << ");\n";
-
-            // Free allocated memory
-             bridgeOS << "\n        // Free allocated memory for parameters\n";
-             bridgeOS << "        for (int i = 0; i < alloc_count; ++i) {\n";
-             bridgeOS << "           if (allocations[i]) free(allocations[i]);\n";
-             bridgeOS << "        }\n";
-
         }
+        bridgeOS << "    }\n";
+            // Free allocated memory
+        bridgeOS << "\n        // Free allocated memory for parameters\n";
+        bridgeOS << "    for (int i = 0; i < alloc_count; ++i) {\n";
+        bridgeOS << "        if (allocations[i]) free(allocations[i]);\n";
+
 
         if (!g_functions.empty()) {
             bridgeOS << "    }\n"; // Close the last else if block
@@ -772,12 +929,51 @@ class ExportASTConsumer : public ASTConsumer {
 
 
 public:
-    ExportASTConsumer(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_)
-        : sigOS(sigOS_), bridgeOS(bridgeOS_), Context(nullptr) {}
+    ExportASTConsumer(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_, ASTContext* Ctx)
+        : sigOS(sigOS_), bridgeOS(bridgeOS_), Context(Ctx) {
+            errs() << "ExportASTConsumer.ctor - Setting up matchers\n";
+        // Define Matchers here, associating them with MatcherCallback
+        Finder.addMatcher(
+            enumDecl(
+                // Keep your matcher conditions: hasAttr(attr::Annotate), isDefinition()
+                // Note: hasAttr only checks for *existence*. The value check happens in run().
+                // Consider adding `hasAttrWithArgs` if you *only* want to match specific annotations,
+                // but your current approach of checking in run() is also fine.
+                allOf(
+                    hasAttr(attr::Annotate),
+                    isDefinition()
+                )
+            ).bind("enumDecl"),
+            &MatcherCallback // Pass the address of the member callback
+        );
+        Finder.addMatcher(
+            recordDecl(
+                allOf(
+                    isStruct(),
+                    hasAttr(attr::Annotate),
+                    isDefinition()
+                )
+            ).bind("structDecl"),
+            &MatcherCallback
+        );
+        Finder.addMatcher(
+            functionDecl(
+                allOf(
+                    hasAttr(attr::Annotate),
+                    isDefinition()
+                )
+            ).bind("exportedFunction"),
+            &MatcherCallback
+        );
+
+        }
 
     void HandleTranslationUnit(ASTContext &Ctx) override {
-        Context = &Ctx; // Store context
-
+        errs() << "ExportASTConsumer::HandleTranslationUnit - Running MatchFinder...\n";
+        // *** RUN THE MATCHER HERE ***
+        Finder.matchAST(Ctx);
+        errs() << "ExportASTConsumer::HandleTranslationUnit - MatchFinder finished.\n";
+            
          // Store the header file name derived from the main source file
          SourceManager &SM = Ctx.getSourceManager();
          FileID MainFileID = SM.getMainFileID();
@@ -831,201 +1027,22 @@ public:
     }
 };
 
-// --- MatchFinder Callback Implementation ---
-class ExportMatcher : public MatchFinder::MatchCallback {
-     ASTContext *Context;
-public:
-     void run(const MatchFinder::MatchResult &Result) override {
-         Context = Result.Context; // Capture context on first match
 
-         // --- Enum Parsing (Task 1.3) ---
-         if (const EnumDecl *ED = Result.Nodes.getNodeAs<EnumDecl>("enumDecl")) {
-             if (ED->isThisDeclarationADefinition()) {
-                 std::string exportName = getAnnotationValue(ED, "EXPORT_AS=");
-                 bool isExported = ED->hasAttr<AnnotateAttr>() && getAnnotationValue(ED, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
-
-                 if (!exportName.empty() || isExported) {
-                     if (exportName.empty()) {
-                         exportName = ED->getNameAsString(); // 如果没有 EXPORT_AS,使用枚举名
-                     }
-                     if (g_enums.count(exportName)) return; // Already processed
-                     errs() << "Processing Enum: " << ED->getNameAsString() << " (Exported As: " << exportName << ")\n";
-                     EnumDefinition enumDef;
-                     enumDef.exportName = exportName;
-                     enumDef.originalName = ED->getNameAsString(); // Store original name
-                     enumDef.description = getAnnotationValue(ED, "DESCRIPTION=");
-                     enumDef.underlyingType = ED->getIntegerType();
-
-                     for (const EnumConstantDecl *ECD : ED->enumerators()) {
-                         EnumConstantInfo constantInfo;
-                         constantInfo.name = ECD->getNameAsString();
-                         // constantInfo.value = ECD->getInitVal().getSExtValue(); // If value needed
-                         enumDef.constants.push_back(constantInfo);
-                     }
-                     g_enums[exportName] = enumDef;
-
-                     // Add header where this enum is defined
-                     SourceManager &SM = Context->getSourceManager();
-                     std::string header = SM.getFilename(ED->getLocation()).str();
-                     size_t last_slash = header.find_last_of("/\\");
-                     if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
-                     if (!header.empty()) g_requiredIncludes.insert(header);
-
-                 }
-             }
-         }
-         // --- Struct Parsing (Task 1.4) ---
-         else if (const RecordDecl *RD = Result.Nodes.getNodeAs<RecordDecl>("structDecl")) {
-              if (RD->isStruct() && RD->isThisDeclarationADefinition()) { // Ensure it's a struct definition
-                 std::string exportName = getAnnotationValue(RD, "EXPORT_AS=");
-                 bool isExported = RD->hasAttr<AnnotateAttr>() && getAnnotationValue(RD, "EXPORT") == "EXPORT"; // 检查 EXPORT 标记
-
-                 if (!exportName.empty() || isExported) {
-                     if (exportName.empty()) {
-                         exportName = RD->getNameAsString(); // 如果没有 EXPORT_AS,使用结构体名
-                     }
-                     if (g_structs.count(exportName)) return; // Already processed
-                     errs() << "Processing Struct: " << RD->getNameAsString() << " (Exported As: " << exportName << ")\n";
-                     StructDefinition structDef;
-                     structDef.exportName = exportName;
-                     // Get original name carefully, might be anonymous or typedef'd
-                     if (RD->getIdentifier()) {
-                         structDef.originalName = RD->getNameAsString();
-                     } else {
-                         // Try to find a typedef name pointing to this anonymous struct
-                         // This requires more advanced AST walking or tracking typedefs
-                         // For now, use a placeholder or try to construct one
-                         structDef.originalName = exportName + "_struct"; // Placeholder
-                         errs() << "Warning: Anonymous struct exported as " << exportName << ". Using placeholder C name.\n";
-                     }
-
-                     // Check for struct typedef like `typedef struct Person { ... } Person;`
-                     // The RecordDecl might not have the name "Person", the TypedefDecl does.
-                     // Need a way to link them. A common pattern is the typedef name matches the EXPORT_AS name.
-                     // Let's assume the originalName *is* the typedef name if the struct tag is missing
-                     // and adjust the struct definition name in the parser generation accordingly.
-                       // A more robust approach involves matching TypedefDecls as well.
-                       // For simplicity now: If struct has no tag name, assume typedef name = exportName exists.
-                      if (!RD->getIdentifier() && RD->getTypedefNameForAnonDecl()) {
-                         structDef.originalName = RD->getTypedefNameForAnonDecl()->getNameAsString();
-                         errs() << "Info: Found typedef name '" << structDef.originalName << "' for anonymous struct exported as " << exportName << "\n";
-                      } else if (!RD->getIdentifier()) {
-                           // If still no name, stick to placeholder
-                          errs() << "Warning: Could not definitively determine original C name for anonymous struct exported as " << exportName << "\n";
-                      }
-
-
-                      structDef.description = getAnnotationValue(RD, "DESCRIPTION=");
-
-                      for (const FieldDecl *FD : RD->fields()) {
-                          FieldInfo fieldInfo;
-                          fieldInfo.name = FD->getNameAsString();
-                          fieldInfo.description = getAnnotationValue(FD, "DESCRIPTION=");
-                          fieldInfo.type = FD->getType();
-                          structDef.fields.push_back(fieldInfo);
-                      }
-                      g_structs[exportName] = structDef;
-
-                       // Add header where this struct is defined
-                     SourceManager &SM = Context->getSourceManager();
-                     std::string header = SM.getFilename(RD->getLocation()).str();
-                     size_t last_slash = header.find_last_of("/\\");
-                     if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
-                     if (!header.empty()) g_requiredIncludes.insert(header);
-                 }
-              }
-         }
-        // --- Function Parsing (Task 1.5) ---
-        else if (const FunctionDecl *FD = Result.Nodes.getNodeAs<FunctionDecl>("exportedFunction")) {
-            if (!FD->isThisDeclarationADefinition()) return; // Only process definitions
-
-            std::string exportName = getAnnotationValue(FD, "EXPORT_AS=");
-            bool isExported = FD->hasAttr<AnnotateAttr>() && getAnnotationValue(FD, "EXPORT") == "EXPORT"; // Check for EXPORT annotation specifically
-
-            if (!exportName.empty() || isExported) {
-                 if (exportName.empty()) {
-                     exportName = FD->getNameAsString(); // Use function name if EXPORT but no EXPORT_AS
-                 }
-
-                // Avoid duplicates if run multiple times? (Less likely with tool setup)
-                // Check if already processed? Need a unique key. exportName should work.
-                bool found = false;
-                for(const auto& f : g_functions) { if (f.exportName == exportName) { found = true; break; } }
-                if(found) return;
-
-                errs() << "Processing Function: " << FD->getNameAsString() << " (Exported As: " << exportName << ")\n";
-
-                FunctionDefinition funcDef;
-                funcDef.exportName = exportName;
-                funcDef.originalName = FD->getNameAsString();
-                funcDef.description = getAnnotationValue(FD, "DESCRIPTION=");
-                funcDef.returnType = FD->getReturnType();
-
-                for (unsigned i = 0; i < FD->getNumParams(); ++i) {
-                    const ParmVarDecl *PVD = FD->getParamDecl(i);
-                    ParameterInfo paramInfo;
-                    paramInfo.name = PVD->getNameAsString();
-                     if (paramInfo.name.empty()) {
-                         // Handle unnamed parameters if necessary, e.g., generate "param1", "param2"
-                         paramInfo.name = "param" + std::to_string(i + 1);
-                         errs() << "Warning: Unnamed parameter found in function " << funcDef.originalName << ", using generated name '" << paramInfo.name << "'\n";
-                     }
-                    paramInfo.description = getAnnotationValue(PVD, "DESCRIPTION=");
-                    paramInfo.type = PVD->getType();
-                    // paramInfo.isRequired = !PVD->hasDefaultArg(); // If default args are supported
-                    funcDef.parameters.push_back(paramInfo);
-                }
-                 g_functions.push_back(funcDef);
-
-                   // Add header where this function is defined
-                 SourceManager &SM = Context->getSourceManager();
-                 std::string header = SM.getFilename(FD->getLocation()).str();
-                 size_t last_slash = header.find_last_of("/\\");
-                 if(last_slash != std::string::npos) header = header.substr(last_slash + 1);
-                 if (!header.empty()) g_requiredIncludes.insert(header);
-            }
-        }
-     }
-};
 
 
 // --- Frontend Action ---
 class ExportAction : public ASTFrontendAction {
      raw_fd_ostream &sigOS;
      raw_fd_ostream &bridgeOS;
-     ExportMatcher MatcherCallback; // Matcher needs to live long enough
-     MatchFinder Finder;
 public:
     ExportAction(raw_fd_ostream &sigOS_, raw_fd_ostream &bridgeOS_) : sigOS(sigOS_), bridgeOS(bridgeOS_) {
-         // Define Matchers
-         Finder.addMatcher(
-             enumDecl(
-                 hasAttr(attr::Annotate), // Check for EXPORT_AS inside callback
-                 isDefinition()           // Process definitions only
-             ).bind("enumDecl"),
-             &MatcherCallback
-         );
-          Finder.addMatcher(
-             recordDecl(
-                 isStruct(),               // Match structs (or isUnion(), isClass())
-                 hasAttr(attr::Annotate), // Check for EXPORT_AS inside callback
-                 isDefinition()
-             ).bind("structDecl"),
-             &MatcherCallback
-         );
-         Finder.addMatcher(
-             functionDecl(
-                 hasAttr(attr::Annotate), // Check for EXPORT or EXPORT_AS inside callback
-                 isDefinition()
-             ).bind("exportedFunction"),
-             &MatcherCallback
-         );
+        errs() << "ExportAction.ctor\n";
     }
 
     std::unique_ptr<ASTConsumer> CreateASTConsumer(CompilerInstance &CI, StringRef InFile) override {
-        Finder.matchAST(CI.getASTContext()); // Run the finder here after AST is built
+        errs() << "ExportAction.CreateASTConsumer\n";
         // The consumer itself does the final generation after traversal
-        return std::make_unique<ExportASTConsumer>(sigOS, bridgeOS);
+        return std::make_unique<ExportASTConsumer>(sigOS, bridgeOS, &CI.getASTContext());
     }
 };
 

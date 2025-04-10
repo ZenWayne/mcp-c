@@ -1,18 +1,17 @@
 #include <stdio.h>
+#include "export_macro.h"
 #include "mcp.h"
-#include "cJSON.h"
-#include "generated_function_signatures.h"
+#include "generated_func.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-extern cJSON* get_all_function_signatures_json();
 int mcp_serve() {
     char buffer[4096] = {0};
     cJSON *json = NULL;
     cJSON *response = NULL;
-    int result = 0;
+    int result = 2;
     
     // Read data from standard input
     if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
@@ -29,8 +28,6 @@ int mcp_serve() {
         }
         return -1;
     }
-    
-    printf("json: %s\n", cJSON_PrintUnformatted(get_all_function_signatures_json()));
     // Process JSON data here
     response = bridge(json);
     printf("%s\n", cJSON_Print(response));
@@ -39,6 +36,8 @@ int mcp_serve() {
     cJSON_Delete(response);
     return result;
 }
+
+
 
 #ifdef __cplusplus
 }
