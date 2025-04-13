@@ -1,0 +1,131 @@
+name: Build Project with Clang/LLVM Libs (Linux & Windows)
+
+on:
+  push:
+    branches: [ "main" ] # Adjust branches as needed
+  pull_request:
+    branches: [ "main" ] # Adjust branches as needed
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest] # Define the matrix for OS
+      fail-fast: false # Optional: Don't cancel all jobs if one fails
+
+    runs-on: ${{ matrix.os }} # Use the OS from the matrix
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y build-essential cmake ninja-build git python3
+
+    - name: Install build dependencies (Windows)
+      if: runner.os == 'Windows'
+      # As of 2025-04-13, ensure winget or choco is suitable for your runner image
+      # Using winget as an example (often preferred now)
+      run: |
+        winget install --id Kitware.CMake --accept-package-agreements --accept-source-agreements
+        winget install --id Ninja-build.Ninja --accept-package-agreements --accept-source-agreements
+        winget install --id Python.Python.3 --accept-package-agreements --accept-source-agreements
+        winget install --id Git.Git --accept-package-agreements --accept-source-agreements
+        # Add relevant tools to PATH if winget doesn't automatically
+        # echo "C:\Program Files\CMake\bin" >> $GITHUB_PATH # Example
+        # echo "C:\Program Files\Git\cmd" >> $GITHUB_PATH # Example
+        # echo "C:\Program Files\Ninja" >> $GITHUB_PATH # Example - Adjust paths as needed
+
+    - name: Define LLVM Version and Paths
+      id: llvm-vars
+      shell: bash # Use bash for consistent path/variable handling below
+      run: |
+        echo "llvm_version=llvmorg-17.0.6" >> $GITHUB_OUTPUT # Choose a specific LLVM release tag (Current as of late 2023, adjust if needed)
+        # Use workspace paths which work cross-platform
+        INSTALL_DIR="${{ github.workspace }}/llvm-install"
+        BUILD_DIR="${{ github.workspace }}/llvm-build"
+        echo "install_dir=${INSTALL_DIR}" >> $GITHUB_OUTPUT
+        echo "build_dir=${BUILD_DIR}" >> $GITHUB_OUTPUT
+
+    - name: Cache LLVM/Clang Installation
+      id: cache-llvm
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.llvm-vars.outputs.install_dir }}
+        key: ${{ matrix.os }}-llvm-${{ steps.llvm-vars.outputs.llvm_version }} # Include OS in cache key
+
+    - name: Build and Install LLVM/Clang (if not cached)
+      if: steps.cache-llvm.outputs.cache-hit != 'true'
+      shell: bash # Use bash for consistency
+      run: |
+        echo "Cache miss. Building LLVM/Clang from source on ${{ runner.os }}..."
+        git clone --depth 1 --branch ${{ steps.llvm-vars.outputs.llvm_version }} https://github.com/llvm/llvm-project.git
+
+        cmake -S llvm-project/llvm -B ${{ steps.llvm-vars.outputs.build_dir }} \
+              -G Ninja \
+              -DCMAKE_INSTALL_PREFIX=${{ steps.llvm-vars.outputs.install_dir }} \
+              -DLLVM_ENABLE_PROJECTS='clang' \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DLLVM_TARGETS_TO_BUILD=X86 \
+
+        echo "Building LLVM/Clang..."
+        cmake --build ${{ steps.llvm-vars.outputs.build_dir }}
+
+        echo "Installing LLVM/Clang..."
+        cmake --install ${{ steps.llvm-vars.outputs.build_dir }}
+
+        echo "Cleaning up LLVM build directory..."
+        rm -rf ${{ steps.llvm-vars.outputs.build_dir }} # Free up space
+
+    - name: Set up environment for project build
+      shell: bash # Use bash for consistency in setting ENV vars
+      run: |
+        echo "Setting environment variables for ${{ runner.os }}..."
+        INSTALL_DIR="${{ steps.llvm-vars.outputs.install_dir }}"
+        echo "CMAKE_PREFIX_PATH=${INSTALL_DIR}" >> $GITHUB_ENV
+
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          CC_PATH="$INSTALL_DIR/bin/clang"
+          CXX_PATH="$INSTALL_DIR/bin/clang++"
+        elif [[ "${{ runner.os }}" == "Windows" ]]; then
+          if [[ -f "$INSTALL_DIR/bin/clang-cl.exe" ]]; then
+             CC_PATH="$INSTALL_DIR/bin/clang-cl.exe"
+             CXX_PATH="$INSTALL_DIR/bin/clang-cl.exe"
+             echo "Using clang-cl.exe"
+          else
+             echo "Warning: clang-cl.exe not found, falling back to clang.exe"
+             CC_PATH="$INSTALL_DIR/bin/clang.exe"
+             CXX_PATH="$INSTALL_DIR/bin/clang++.exe"
+          fi
+        else
+          echo "Unsupported OS: ${{ runner.os }}"
+          exit 1
+        fi
+
+        echo "Using CC = $CC_PATH"
+        echo "Using CXX = $CXX_PATH"
+        echo "CC=$CC_PATH" >> $GITHUB_ENV
+        echo "CXX=$CXX_PATH" >> $GITHUB_ENV
+        echo "$INSTALL_DIR/bin" >> $GITHUB_PATH
+        echo "PATH is now: $PATH"
+
+
+    - name: Configure Project with CMake
+      shell: bash # Use bash for consistency
+      run: |
+        echo "Configuring project in ./export directory on ${{ runner.os }}..."
+        # *** MODIFIED HERE ***
+        # Source directory (-S) is now 'export'
+        # Build directory (-B) is 'build' (will be created at the repo root: ./build)
+        cmake -S export -B build -G Ninja
+
+    - name: Build Project
+      shell: bash # Use bash for consistency
+      run: |
+        echo "Building project target 'export' on ${{ runner.os }}..."
+        # *** ENSURE CONSISTENCY HERE ***
+        # Use the same build directory specified in the configure step's -B argument (i.e., 'build')
+        cmake --build build --target export --config Release
