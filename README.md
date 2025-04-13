@@ -12,7 +12,6 @@ utilize annotate to generate code automatically, only need to focus on what to n
 1. prerequisites
 - vcpkg(only for windows)
 - cmake
-- ninja
 - clang
 - cJSON
 2. build the project
@@ -25,10 +24,9 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ^
     -DCMAKE_BUILD_TYPE=Release ^
     -B build -S . 
 
-powershell.exe -Command "if (Test-Path 'build\compile_commands.json') { (Get-Content -Path 'build\compile_commands.json') -replace '/', '\\' | Set-Content -Path 'build\compile_commands.json' }"
 ```
 
-1. run the project
+3. run the project
 ```bash
 ./mcpc
 ```
