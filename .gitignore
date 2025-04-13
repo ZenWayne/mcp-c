@@ -53,3 +53,5 @@ build.bat
 *.tlog
 .DS_Store
 Thumbs.db 
+
+src/generated_src/*

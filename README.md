@@ -8,11 +8,37 @@ utilize annotate to generate code automatically, only need to focus on what to n
 2. build the project, `cmake -B build -S .  && cmake --build .`, export.cpp will generate all the tedious code for you(like tools list, bridge json to struct, etc.)
 3. run the project, `./mcpc`
 
+## quick start
+1. prerequisites
+- vcpkg
+- cmake
+- ninja
+- clang
+- cJSON
+2. build the project
+3. 
+```bash
+cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ^
+    -DCMAKE_TOOLCHAIN_FILE="path/to/vcpkg/scripts/buildsystems/vcpkg.cmake" ^
+    -G "Ninja" ^
+    -DVCPKG_APPLOCAL_DEPS=ON ^
+    -DCMAKE_BUILD_TYPE=Release ^
+    -B build -S . 
+
+powershell.exe -Command "if (Test-Path 'build\compile_commands.json') { (Get-Content -Path 'build\compile_commands.json') -replace '/', '\\' | Set-Content -Path 'build\compile_commands.json' }"
+```
+
+3. run the project
+```bash
+./mcpc
+```
+
 ## supported feature
 1. export struct
 first you need to add the macro to the struct
 consider this file name struct.c
 ```c
+#include "export_macro.h" //first include the export macro
 typedef enum EXPORT COLOR {
     RED,
     GREEN,
@@ -89,17 +115,24 @@ to generate definition json like the following
 first you need to add the macro for functions and struct you need to export
 consider this file name func.c
 ```c
+#include "export_macro.h" //first include the export macro
 ... //struct definition here, with the code sample in section 1
-EXPORT_AS(get_color)
+EXPORT_AS(get_color) //if the function is a handler of tool "get_color", you need to add this macro
 cJSON* get_color(COLOR c)
 {
 
 }
 
-EXPORT_AS(get_person_info)
+EXPORT_AS(get_person_info) //if the function is a handler of tool "get_person_info", you need to add this macro
 cJSON* get_person_info(person* p, int id)
 {
 
+}
+
+EXPORT_AS(tools, list) // if the function is a handler of tool "tools/list", you need to add this macro, use the comma to separate the tool name and the function name
+cJSON* tools_list() {
+    int i = 0;
+    return get_all_function_signatures_json();
 }
 ```
 

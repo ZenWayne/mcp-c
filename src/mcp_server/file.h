@@ -1,3 +1,5 @@
+#ifndef FILE_H
+#define FILE_H
 #include "export_macro.h"
 #include <stdbool.h>
 #include "cJSON.h"
@@ -24,8 +26,8 @@ typedef struct EXPORT person {
     cloth wearing_cloths;
 } person;
 
-
-
+cJSON* get_person_info(person* p);
 #ifdef __cplusplus
 }
+#endif
 #endif

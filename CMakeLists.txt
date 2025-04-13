@@ -1,150 +1,154 @@
 cmake_minimum_required(VERSION 3.15)
-set(LLVM_ENABLE_DIA_SDK OFF)
+
 project(MCPC)
 
 # 添加自定义模块路径
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake")
-
-find_package(Clang REQUIRED Tooling ASTMatchers)
-find_package(CURL REQUIRED)
-include_directories(${CLANG_INCLUDE_DIRS})
-
 set(CMAKE_CXX_STANDARD 17)
 set(PROJECT_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
-
-# 添加项目的include目录
-include_directories(${PROJECT_SOURCE_DIR}/src/include)
-include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server)
-include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server/base)
-include_directories(${PROJECT_SOURCE_DIR}/src/mcp_server/filesystems)
-
-# 递归查找所有子目录并添加到包含路径
-file(GLOB_RECURSE MCP_SERVER_DIRS LIST_DIRECTORIES true ${PROJECT_SOURCE_DIR}/src/mcp_server/*)
-set(MCP_SERVER_INCLUDE_DIRS "")
-foreach(dir ${MCP_SERVER_DIRS})
-    if(IS_DIRECTORY ${dir})
-        # 将路径转换为CMake格式
-        file(TO_CMAKE_PATH ${dir} dir)
-        list(APPEND MCP_SERVER_INCLUDE_DIRS ${dir})
-    endif()
-endforeach()
-
-# 为MSVC设置MD运行库以匹配LLVM (确保这段代码在 add_subdirectory(cJSON) 之前)
-if(MSVC)
-  # 强制使用Release模式的运行库
-  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL" CACHE STRING "MSVC Runtime Library" FORCE)
-  # 确保 C 和 C++ 编译器标志包含 /MD 和正确的调试级别宏
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} /MD /D_ITERATOR_DEBUG_LEVEL=0" CACHE STRING "C Compiler Flags" FORCE)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MD /D_ITERATOR_DEBUG_LEVEL=0" CACHE STRING "C++ Compiler Flags" FORCE)
-endif()
-
-# 添加cJSON库 (这行应该在 if(MSVC) 之后)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/cJSON)
-
+message(STATUS "PROJECT_SOURCE_DIR: ${PROJECT_SOURCE_DIR}")
 # 设置生成编译数据库
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# 定义输出文件的路径
-set(FUNCTION_SIGNATURES_OUTPUT "${PROJECT_SOURCE_DIR}/src/generated_function_signatures.c")
-set(BRIDGE_CODE_OUTPUT "${PROJECT_SOURCE_DIR}/src/generated_bridge_code.c")
-
-# 收集所有需要编译的源文件
-file(GLOB_RECURSE MCP_SERVER_SOURCES 
-    ${PROJECT_SOURCE_DIR}/src/mcp_server/**/*.cpp
-    ${PROJECT_SOURCE_DIR}/src/mcp_server/**/*.c
-)
-
-# 排除不需要的文件
-file(GLOB_RECURSE EXCLUDED_FILES 
-    ${PROJECT_SOURCE_DIR}/src/mcp_server/base/mcp.c
-    # 移除对 base 目录的排除
-)
-list(REMOVE_ITEM MCP_SERVER_SOURCES ${EXCLUDED_FILES})
-
 # 创建编译命令数据库的路径
 set(COMPILE_COMMANDS_JSON "${CMAKE_BINARY_DIR}/compile_commands.json")
+message(STATUS "compile_commands.json: ${COMPILE_COMMANDS_JSON}")
 
-message(STATUS "CMAKE_BINARY_DIR: ${CMAKE_BINARY_DIR}")
-
+#1. export 
 add_executable(export ${PROJECT_SOURCE_DIR}/src/export.cpp)
-target_link_libraries(export PRIVATE clangTooling clangASTMatchers clangFrontend clangDriver clangBasic)
+find_package(LLVM CONFIG REQUIRED)
+if(LLVM_FOUND)
+    message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
+    message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
+    # 设置 LLVM 定义和包含目录
+    add_definitions(${LLVM_DEFINITIONS})
+    include_directories(${LLVM_INCLUDE_DIRS})
+    # 设置 LLVM 组件
+    llvm_map_components_to_libnames(llvm_libs Support)
+    target_include_directories(export PRIVATE ${LLVM_INCLUDE_DIRS})
+    message(STATUS "llvm_libs: ${llvm_libs}")
+    message(STATUS "LLVM_INCLUDE_DIRS: ${LLVM_INCLUDE_DIRS}")
+    target_link_libraries(export PRIVATE ${llvm_libs})
+endif()
+find_package(Clang REQUIRED Basic AST Frontend Tooling ASTMatchers)
+if(Clang_FOUND)
+    message(STATUS "Found Clang ${CLANG_PACKAGE_VERSION}")
+    target_include_directories(export PRIVATE ${CLANG_INCLUDE_DIRS})
+    message(STATUS "Clang_INCLUDE_DIRS: ${CLANG_INCLUDE_DIRS}")
+    target_link_libraries(export PRIVATE 
+        clangBasic
+        clangAST
+        clangFrontend
+        clangTooling
+        clangASTMatchers
+    )
+endif()
 
-# 打印调试信息
-message(STATUS "MCP_SERVER_DIRS: ${MCP_SERVER_DIRS}")
-message(STATUS "MCP_SERVER_INCLUDE_DIRS: ${MCP_SERVER_INCLUDE_DIRS}")
 
-# 生成-I参数列表
-# set(INCLUDE_ARGS "-I${PROJECT_SOURCE_DIR}/src/include -I${CMAKE_CURRENT_SOURCE_DIR}/cJSON")
-# foreach(include_dir ${MCP_SERVER_INCLUDE_DIRS})
-#     string(APPEND INCLUDE_ARGS " -I${include_dir}")
-# endforeach()
+#3. generate code file for dependency
+file(GLOB_RECURSE SOURCE_NEED_TO_BE_GENERATED
+    ${PROJECT_SOURCE_DIR}/src/**/*.cpp
+    ${PROJECT_SOURCE_DIR}/src/**/*.c
+)
+# 排除不需要的文件
+file(GLOB_RECURSE EXCLUDED_FILES 
+    ${PROJECT_SOURCE_DIR}/src/base/mcp.c
+    # 移除对 base 目录的排除
+)
+list(REMOVE_ITEM SOURCE_NEED_TO_BE_GENERATED ${EXCLUDED_FILES})
+message(STATUS "SOURCE_NEED_TO_BE_GENERATED: ${SOURCE_NEED_TO_BE_GENERATED}")
+# 创建生成文件并收集生成文件路径
+set(GENERATED_SOURCES 
+    ${PROJECT_SOURCE_DIR}/src/generated_src/generated_function_signatures.c
+    ${PROJECT_SOURCE_DIR}/src/generated_src/generated_bridge_code.c
+)
+foreach(source_file ${SOURCE_NEED_TO_BE_GENERATED})
+    # 获取相对路径
+    file(RELATIVE_PATH rel_path ${PROJECT_SOURCE_DIR}/src/mcp_server ${source_file})
+    # 获取文件名（不带扩展名）
+    get_filename_component(file_name ${rel_path} NAME_WE)
+    # 构建生成文件的路径
+    set(generated_file ${PROJECT_SOURCE_DIR}/src/generated_src/${file_name}_bridge.c)
+    list(APPEND GENERATED_SOURCES ${generated_file})
+    # 创建生成文件
+    add_custom_command(
+        OUTPUT ${generated_file}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${PROJECT_SOURCE_DIR}/src/generated_src
+        COMMAND ${CMAKE_COMMAND} -E touch ${generated_file}
+        DEPENDS ${source_file}
+    )
+endforeach()
+message(STATUS "GENERATED_SOURCES: ${GENERATED_SOURCES}")
+# 收集所有需要编译的源文件
+file(GLOB_RECURSE MCPC_SOURCES 
+    ${PROJECT_SOURCE_DIR}/src/**/*.cpp
+    ${PROJECT_SOURCE_DIR}/src/**/*.c
+    ${PROJECT_SOURCE_DIR}/src/main.c
+)
+# 添加主可执行文件
+add_executable(mcpc
+    ${MCPC_SOURCES}
+    ${GENERATED_SOURCES}
+)
 
-message(STATUS "INCLUDE_ARGS: ${INCLUDE_ARGS}")
+# 递归查找所有子目录并添加到包含路径 do not forget to add "/" at the end of the path
+file(GLOB_RECURSE MCPC_INCLUDE_DIRS LIST_DIRECTORIES true "${PROJECT_SOURCE_DIR}/src/base") #why /src and /src/ not work ????
+message(STATUS "MCPC_INCLUDE_DIRS: ${MCPC_INCLUDE_DIRS}")
+foreach(dir ${MCPC_INCLUDE_DIRS})
+    target_include_directories(mcpc PRIVATE ${dir})
+endforeach()
 
+
+#generated code
+set(FUNCTION_SIGNATURES_OUTPUT "${PROJECT_SOURCE_DIR}/src/generated_src/generated_function_signatures.c")
+set(BRIDGE_CODE_OUTPUT "${PROJECT_SOURCE_DIR}/src/generated_src/generated_bridge_code.c")
 add_custom_command(
     OUTPUT ${FUNCTION_SIGNATURES_OUTPUT} ${BRIDGE_CODE_OUTPUT}
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
     COMMAND $<TARGET_FILE:export> 
             -p "${CMAKE_BINARY_DIR}" 
-            ${MCP_SERVER_SOURCES} 
+            ${SOURCE_NEED_TO_BE_GENERATED} 
             -s ${FUNCTION_SIGNATURES_OUTPUT} 
             -b ${BRIDGE_CODE_OUTPUT}
-            -- -I${PROJECT_SOURCE_DIR}/src/include 
-            -I${CMAKE_CURRENT_SOURCE_DIR}/cJSON 
-            -I${PROJECT_SOURCE_DIR}/src/mcp_server
-            -I${PROJECT_SOURCE_DIR}/src/mcp_server/filesystems
+            -o ${PROJECT_SOURCE_DIR}/src/generated_src
+            -- 
+            ${CMAKE_COMMAND} -E echo "-I$<JOIN:${MCPC_INCLUDE_DIRS}, -I>"
     DEPENDS ${MCP_SERVER_SOURCES} export ${COMPILE_COMMANDS_JSON}
     VERBATIM
 )
-
 add_custom_target(generate_code
     DEPENDS ${FUNCTION_SIGNATURES_OUTPUT} ${BRIDGE_CODE_OUTPUT}
 )
+add_dependencies(mcpc generate_code)
 
-# 递归查找builtin目录下所有的cpp和h文件
-file(GLOB_RECURSE BUILTIN_SOURCES 
-    ${PROJECT_SOURCE_DIR}/src/builtin/**/*.cpp
-    ${PROJECT_SOURCE_DIR}/src/builtin/**/*.h
-)
-
-# 添加主可执行文件，这次只包含 main.c
-add_executable(mcpc
-    ${PROJECT_SOURCE_DIR}/src/main.c
-    ${PROJECT_SOURCE_DIR}/src/mcp_server/base/mcp.c
-    ${FUNCTION_SIGNATURES_OUTPUT}
-    ${CMAKE_CURRENT_SOURCE_DIR}/cJSON/cJSON.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/cJSON/cJSON_Utils.h
-    ${BRIDGE_CODE_OUTPUT}
-    ${BUILTIN_SOURCES}
-    ${MCP_SERVER_SOURCES}  # 添加所有收集到的mcp_server源文件
-)
-
-# 其他依赖仍然注释掉
-target_link_libraries(mcpc PRIVATE CURL::libcurl)
-# add_dependencies(mcpc generate_code)
-
-# # 平台特定的设置
-# if(MSVC)
-#     add_definitions(-DBUILDING_DLL)
-#     message(STATUS "MSVC: Building with DLL export definitions")
-    
-#     # 为所有源文件添加编译选项
-#     foreach(source_file ${MCP_SERVER_SOURCES})
-#         if(source_file MATCHES "\\.c$")
-#             set_source_files_properties(${source_file} PROPERTIES COMPILE_DEFINITIONS "BUILDING_DLL")
-#         endif()
-#     endforeach()
-# endif()
+#curl
+find_package(curl REQUIRED)
+if(curl_FOUND)
+    message(STATUS "Found CURL library: ${CURL_LIBRARIES}")
+    message(STATUS "Found CURL include directory: ${CURL_INCLUDE_DIRS}")
+    # Link your executable or library against curl
+    target_link_libraries(mcpc PRIVATE CURL::libcurl)
+    # Include the curl headers in your source files
+    target_include_directories(mcpc PRIVATE ${CURL_INCLUDE_DIRS})
+else()
+    message(FATAL_ERROR "CURL library not found. Make sure it's installed via vcpkg and the toolchain file is correctly set.")
+endif()
+#cJSON
+find_package(cJSON REQUIRED)
+if(cJSON_FOUND)
+    message(STATUS "Found CJSON library: ${CJSON_LIBRARIES}")
+    message(STATUS "Found CJSON include directory: ${CJSON_INCLUDE_DIRS}")
+    # Link your executable or library against curl
+    target_link_libraries(mcpc PRIVATE ${CJSON_LIBRARIES})
+    # Include the curl headers in your source files
+    target_include_directories(mcpc PRIVATE ${CJSON_INCLUDE_DIRS}/cjson)
+else()
+    message(FATAL_ERROR "CJSON library not found. Make sure it's installed via vcpkg and the toolchain file is correctly set.")
+endif()
 
 # 打印调试信息
 message(STATUS "MCP Server sources:")
 foreach(source_file 
-        ${PROJECT_SOURCE_DIR}/src/main.c
-        ${PROJECT_SOURCE_DIR}/src/mcp_server/base/mcp.c
-        ${FUNCTION_SIGNATURES_OUTPUT}
-        ${BRIDGE_CODE_OUTPUT}
-        ${BUILTIN_SOURCES}
-        ${MCP_SERVER_SOURCES}  # 添加所有收集到的mcp_server源文件
+        ${MCPC_SOURCES}  # 添加所有收集到的mcp_server源文件
+        ${GENERATED_SOURCES}
 )
     message(STATUS "  ${source_file}")
 endforeach()
