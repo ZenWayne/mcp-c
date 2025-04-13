@@ -27,23 +27,19 @@ jobs:
 
     - name: Install build dependencies (Windows)
       if: runner.os == 'Windows'
-      # As of 2025-04-13, ensure winget or choco is suitable for your runner image
-      # Using winget as an example (often preferred now)
+      # *** MODIFIED HERE: Using Chocolatey (choco) instead of winget ***
       run: |
-        winget install --id Kitware.CMake --accept-package-agreements --accept-source-agreements
-        winget install --id Ninja-build.Ninja --accept-package-agreements --accept-source-agreements
-        winget install --id Python.Python.3 --accept-package-agreements --accept-source-agreements
-        winget install --id Git.Git --accept-package-agreements --accept-source-agreements
-        # Add relevant tools to PATH if winget doesn't automatically
-        # echo "C:\Program Files\CMake\bin" >> $GITHUB_PATH # Example
-        # echo "C:\Program Files\Git\cmd" >> $GITHUB_PATH # Example
-        # echo "C:\Program Files\Ninja" >> $GITHUB_PATH # Example - Adjust paths as needed
+        choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        choco install ninja python git -y
+        # Refreshen environment variables - sometimes needed for PATH changes from choco
+        # Write-Host "Refreshing environment variables..."
+        # $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
     - name: Define LLVM Version and Paths
       id: llvm-vars
       shell: bash # Use bash for consistent path/variable handling below
       run: |
-        echo "llvm_version=llvmorg-17.0.6" >> $GITHUB_OUTPUT # Choose a specific LLVM release tag (Current as of late 2023, adjust if needed)
+        echo "llvm_version=llvmorg-17.0.6" >> $GITHUB_OUTPUT # Choose a specific LLVM release tag (Adjust if needed, e.g., llvmorg-18.1.3 for newer)
         # Use workspace paths which work cross-platform
         INSTALL_DIR="${{ github.workspace }}/llvm-install"
         BUILD_DIR="${{ github.workspace }}/llvm-build"
@@ -55,24 +51,32 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ${{ steps.llvm-vars.outputs.install_dir }}
-        key: ${{ matrix.os }}-llvm-${{ steps.llvm-vars.outputs.llvm_version }} # Include OS in cache key
+        key: ${{ matrix.os }}-llvm-${{ steps.llvm-vars.outputs.llvm_version }}-${{ hashFiles('**/CMakeLists.txt') }} # Add hash of CMakeLists to key for rebuild trigger on change
+        restore-keys: |
+            ${{ matrix.os }}-llvm-${{ steps.llvm-vars.outputs.llvm_version }}-
+
 
     - name: Build and Install LLVM/Clang (if not cached)
       if: steps.cache-llvm.outputs.cache-hit != 'true'
       shell: bash # Use bash for consistency
       run: |
-        echo "Cache miss. Building LLVM/Clang from source on ${{ runner.os }}..."
+        echo "Cache miss or cache key changed. Building LLVM/Clang from source on ${{ runner.os }}..."
         git clone --depth 1 --branch ${{ steps.llvm-vars.outputs.llvm_version }} https://github.com/llvm/llvm-project.git
 
+        # Configure LLVM/Clang using CMake
         cmake -S llvm-project/llvm -B ${{ steps.llvm-vars.outputs.build_dir }} \
               -G Ninja \
               -DCMAKE_INSTALL_PREFIX=${{ steps.llvm-vars.outputs.install_dir }} \
               -DLLVM_ENABLE_PROJECTS='clang' \
               -DCMAKE_BUILD_TYPE=Release \
               -DLLVM_TARGETS_TO_BUILD=X86 \
+              # Add platform specific flags if necessary here
+              # e.g., -DLLVM_USE_CRT_RELEASE=MT for Windows if needed
 
         echo "Building LLVM/Clang..."
-        cmake --build ${{ steps.llvm-vars.outputs.build_dir }}
+        # Get number of cores to speed up build (Linux/macOS/Windows with bash)
+        CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+        cmake --build ${{ steps.llvm-vars.outputs.build_dir }} --parallel ${CORES}
 
         echo "Installing LLVM/Clang..."
         cmake --install ${{ steps.llvm-vars.outputs.build_dir }}
@@ -87,16 +91,18 @@ jobs:
         INSTALL_DIR="${{ steps.llvm-vars.outputs.install_dir }}"
         echo "CMAKE_PREFIX_PATH=${INSTALL_DIR}" >> $GITHUB_ENV
 
+        # Determine correct Clang compiler executable names based on OS
         if [[ "${{ runner.os }}" == "Linux" ]]; then
           CC_PATH="$INSTALL_DIR/bin/clang"
           CXX_PATH="$INSTALL_DIR/bin/clang++"
         elif [[ "${{ runner.os }}" == "Windows" ]]; then
+          # Prefer clang-cl.exe on Windows for MSVC compatibility
           if [[ -f "$INSTALL_DIR/bin/clang-cl.exe" ]]; then
              CC_PATH="$INSTALL_DIR/bin/clang-cl.exe"
              CXX_PATH="$INSTALL_DIR/bin/clang-cl.exe"
              echo "Using clang-cl.exe"
           else
-             echo "Warning: clang-cl.exe not found, falling back to clang.exe"
+             echo "Warning: clang-cl.exe not found, falling back to clang.exe/clang++.exe"
              CC_PATH="$INSTALL_DIR/bin/clang.exe"
              CXX_PATH="$INSTALL_DIR/bin/clang++.exe"
           fi
@@ -107,18 +113,21 @@ jobs:
 
         echo "Using CC = $CC_PATH"
         echo "Using CXX = $CXX_PATH"
+
+        # Set CC and CXX environment variables for CMake to pick up
         echo "CC=$CC_PATH" >> $GITHUB_ENV
         echo "CXX=$CXX_PATH" >> $GITHUB_ENV
+
+        # Add clang tools directory to PATH (syntax works for bash on both OS)
         echo "$INSTALL_DIR/bin" >> $GITHUB_PATH
-        echo "PATH is now: $PATH"
+        echo "PATH includes LLVM bin: $PATH"
 
 
     - name: Configure Project with CMake
       shell: bash # Use bash for consistency
       run: |
         echo "Configuring project in ./export directory on ${{ runner.os }}..."
-        # *** MODIFIED HERE ***
-        # Source directory (-S) is now 'export'
+        # Source directory (-S) is 'export'
         # Build directory (-B) is 'build' (will be created at the repo root: ./build)
         cmake -S export -B build -G Ninja
 
@@ -126,6 +135,7 @@ jobs:
       shell: bash # Use bash for consistency
       run: |
         echo "Building project target 'export' on ${{ runner.os }}..."
-        # *** ENSURE CONSISTENCY HERE ***
-        # Use the same build directory specified in the configure step's -B argument (i.e., 'build')
-        cmake --build build --target export --config Release
+        # Use the same build directory specified in the configure step's -B argument ('build')
+        # Get number of cores to speed up build (Linux/macOS/Windows with bash)
+        CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)
+        cmake --build build --target export --config Release --parallel ${CORES}
