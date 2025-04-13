@@ -10,13 +10,13 @@ utilize annotate to generate code automatically, only need to focus on what to n
 
 ## quick start
 1. prerequisites
-- vcpkg
+- vcpkg(only for windows)
 - cmake
 - ninja
 - clang
 - cJSON
 2. build the project
-3. 
+windows
 ```bash
 cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ^
     -DCMAKE_TOOLCHAIN_FILE="path/to/vcpkg/scripts/buildsystems/vcpkg.cmake" ^
@@ -28,7 +28,7 @@ cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ^
 powershell.exe -Command "if (Test-Path 'build\compile_commands.json') { (Get-Content -Path 'build\compile_commands.json') -replace '/', '\\' | Set-Content -Path 'build\compile_commands.json' }"
 ```
 
-3. run the project
+1. run the project
 ```bash
 ./mcpc
 ```
