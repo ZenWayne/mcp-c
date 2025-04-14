@@ -99,71 +99,7 @@ jobs:
     - uses: ilammy/msvc-dev-cmd@v1
     - name: Restore from cache the dependencies and generate project files
       run: |
-        cmake --workflow --preset ninja-vcpkg-release
-
-    # 8. Configure Project with CMake (Adapted from Build Project workflow, using submodule paths)
-    #    This step implicitly runs vcpkg install via the toolchain file, leveraging binary caching.
-    - name: Configure Project with CMake (using Clang, default generator)
-      run: |
-        # --- Set Clang Compilers (Logic from Build Project workflow, adapted paths) ---
-        echo "Setting up Clang compilers..."
-        if [[ "${{ runner.os }}" == "Linux" ]]; then
-          CLANG_PATH="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang"
-          CLANGPP_PATH="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang++"
-          if [[ ! -f "$CLANG_PATH" ]] || [[ ! -f "$CLANGPP_PATH" ]]; then
-             echo "::error::Clang compiler not found after vcpkg install via CMake. Check vcpkg.json includes 'clang' and 'llvm'."
-             # Try bootstrapping vcpkg manually just in case toolchain didn't run install yet
-             # pushd ${{ env._VCPKG_ }} && ./bootstrap-vcpkg.sh && popd
-             # ${{ env._VCPKG_ }}/vcpkg install clang llvm --triplet ${{ matrix.vcpkg_triplet }}
-             # Recheck paths... if still not found, then exit.
-             if [[ ! -f "$CLANG_PATH" ]] || [[ ! -f "$CLANGPP_PATH" ]]; then exit 1; fi
-          fi
-          export CC="$CLANG_PATH"
-          export CXX="$CLANGPP_PATH"
-          echo "CC=$CC"
-          echo "CXX=$CXX"
-        elif [[ "${{ runner.os }}" == "Windows" ]]; then
-          CLANG_CL_PATH_NIX="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/llvm/clang-cl.exe"
-          if [[ ! -f "$CLANG_CL_PATH_NIX" ]]; then
-             echo "::error::Clang-cl compiler not found after vcpkg install via CMake. Check vcpkg.json includes 'clang' and 'llvm'."
-             # pushd ${{ env._VCPKG_ }} && .\bootstrap-vcpkg.bat && popd
-             # ${{ env._VCPKG_ }}/vcpkg install clang llvm --triplet ${{ matrix.vcpkg_triplet }}
-             if [[ ! -f "$CLANG_CL_PATH_NIX" ]]; then exit 1; fi
-          fi
-          CLANG_CL_PATH_WIN=$(cygpath -w "${CLANG_CL_PATH_NIX}")
-          export CC="${CLANG_CL_PATH_WIN}"
-          export CXX="${CLANG_CL_PATH_WIN}"
-          echo "CC=$CC"
-          echo "CXX=$CXX"
-        fi
-        echo "Verifying compilers:"
-        "$CC" --version
-        "$CXX" --version
-
-        # --- Configure CMake (Command from Build Project workflow, adapted paths) ---
-        VCPKG_TOOLCHAIN_FILE_NIX="${{ env._VCPKG_ }}/scripts/buildsystems/vcpkg.cmake"
-        if [[ "${{ runner.os }}" == "Windows" ]]; then
-            VCPKG_TOOLCHAIN_FILE=$(cygpath -w "${VCPKG_TOOLCHAIN_FILE_NIX}")
-        else
-            VCPKG_TOOLCHAIN_FILE="${VCPKG_TOOLCHAIN_FILE_NIX}"
-        fi
-
-        echo "Using Toolchain File: ${VCPKG_TOOLCHAIN_FILE}"
-        echo "Using Triplet: ${{ matrix.vcpkg_triplet }}"
-        echo "Source Directory: ${{ env.SOURCE_DIR }}"
-
-        # Configure using the default generator (Makefiles/MSVC), not Ninja.
-        # vcpkg dependencies (cjson, llvm, clang) should be listed in vcpkg.json
-        # inside the SOURCE_DIR or project root.
-        cmake -S ${{ env.SOURCE_DIR }} -B build \
-          -DCMAKE_TOOLCHAIN_FILE="${VCPKG_TOOLCHAIN_FILE}" \
-          -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_C_COMPILER="$CC" \
-          -DCMAKE_CXX_COMPILER="$CXX"
-          # -G "Unix Makefiles" # Explicitly specify generator if needed, usually default is fine
-          # -G "Visual Studio 17 2022" # Or specify VS generator on Windows if needed
-      shell: bash
+        cmake --preset ninja-multi-vcpkg
 
     # 9. Build Project (From Build Project workflow)
     - name: Build Project Target
@@ -186,7 +122,7 @@ jobs:
 
         # --- Build using CMake ---
         # Build only the specific target with the Release configuration
-        cmake --build build --target ${{ env.EXECUTABLE_NAME }} --config Release --parallel ${CORES}
+        cmake --build build --target ${{ env.EXECUTABLE_NAME }} --preset ninja-vcpkg-release --parallel ${CORES}
       shell: bash
 
     # 10. Package Specific Artifacts (Executable + SO/DLLs) (From Build Project workflow)
