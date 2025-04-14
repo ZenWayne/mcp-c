@@ -7,6 +7,7 @@ on:
     branches: [ "main" ] # Adjust branches as needed
 
 env:
+  VCPKG_JSON: ".github/workflows/vcpkg.json"
   VCPKG_ROOT: ${{ github.workspace }}/vcpkg
   VCPKG_PACKAGES: "cjson llvm clang"
   EXECUTABLE_NAME: "export" # Define the base executable name
@@ -43,6 +44,7 @@ jobs:
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgDirectory: ${{ env.VCPKG_ROOT }}
+        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
         runVcpkgInstall: false
 
     - name: Cache vcpkg artifacts

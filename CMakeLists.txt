@@ -71,19 +71,19 @@ foreach(dir ${MCPC_INCLUDE_DIRS})
 endforeach()
 target_include_directories(mcpc PRIVATE ${PROJECT_SOURCE_DIR}/src) # Add the main src directory
 
-#curl
-find_package(curl REQUIRED)
-if(curl_FOUND)
-    message(STATUS "Found CURL library: ${CURL_LIBRARIES}")
-    message(STATUS "Found CURL include directory: ${CURL_INCLUDE_DIRS}")
-    # Link your executable or library against curl
-    target_link_libraries(mcpc PRIVATE CURL::libcurl)
-    # Include the curl headers in your source files
-    target_include_directories(mcpc PRIVATE ${CURL_INCLUDE_DIRS})
-    list(APPEND MCPC_INCLUDE_DIRS ${CURL_INCLUDE_DIRS})
-else()
-    message(FATAL_ERROR "CURL library not found. Make sure it's installed via vcpkg and the toolchain file is correctly set.")
-endif()
+# #curl
+# find_package(curl REQUIRED)
+# if(curl_FOUND)
+#     message(STATUS "Found CURL library: ${CURL_LIBRARIES}")
+#     message(STATUS "Found CURL include directory: ${CURL_INCLUDE_DIRS}")
+#     # Link your executable or library against curl
+#     target_link_libraries(mcpc PRIVATE CURL::libcurl)
+#     # Include the curl headers in your source files
+#     target_include_directories(mcpc PRIVATE ${CURL_INCLUDE_DIRS})
+#     list(APPEND MCPC_INCLUDE_DIRS ${CURL_INCLUDE_DIRS})
+# else()
+#     message(FATAL_ERROR "CURL library not found. Make sure it's installed via vcpkg and the toolchain file is correctly set.")
+# endif()
 #cJSON
 find_package(cJSON REQUIRED)
 if(cJSON_FOUND)
