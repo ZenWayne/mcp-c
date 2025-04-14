@@ -75,55 +75,49 @@ jobs:
         sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config
 
     # 5. Get CMake (from hosted-pure-workflow) - Installs CMake, Ninja not used later
-    - name: Install/Cache CMake
-      uses: lukka/get-cmake@latest
+    - uses: lukka/get-cmake@latest
 
-    # Restore vcpkg from the GitHub Action cache service. Note that packages are restored by vcpkg's binary caching
-    # when it is being run afterwards by CMake.
-    - name: Restore vcpkg
-      uses: actions/cache@v4
+    - name: Restore from cache and setup vcpkg executable and data files.
+      uses: lukka/run-vcpkg@v11
       with:
-        # The first path is the location of vcpkg: it contains the vcpkg executable and data files, as long as the
-        # built package archives (aka binary cache) which are located by VCPKG_DEFAULT_BINARY_CACHE env var.
-        # The other paths starting with '!' are exclusions: they contain termporary files generated during the build of the installed packages.
-        path: |
-          ${{ env._VCPKG_ }}
-          !${{ env._VCPKG_ }}/buildtrees
-          !${{ env._VCPKG_ }}/packages
-          !${{ env._VCPKG_ }}/downloads
-          !${{ env._VCPKG_ }}/installed
-        # The key is composed in a way that it gets properly invalidated whenever a different version of vcpkg is being used.
-        key: |
-          ${{ hashFiles( '.git/modules/vcpkg/HEAD' )}}
+        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
 
-    - uses: ilammy/msvc-dev-cmd@v1
-    - name: Restore from cache the dependencies and generate project files
-      run: |
-        cmake --preset ninja-multi-vcpkg
+    # Note: if the preset misses the "configuration", it is possible to explicitly select the
+    # configuration with the additional `--config` flag, e.g.:
+    #   buildPreset: 'ninja-vcpkg'
+    #   buildPresetAdditionalArgs: "[`--config`, `Release`]"
+    #   testPreset: 'ninja-vcpkg'
+    #   testPresetAdditionalArgs: "[`--config`, `Release`]"
+    - name: Run CMake+vcpkg+Ninja+CTest to build packages and generate/build/test the code.
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: 'ninja-multi-vcpkg'
+        buildPreset: 'ninja-vcpkg-release'
+        testPreset: 'test-release'
 
     # 9. Build Project (From Build Project workflow)
-    - name: Build Project Target
-      run: |
-        echo "Building project target '${{ env.EXECUTABLE_NAME }}' on ${{ runner.os }}..."
-        # --- Determine Cores ---
-        CORES=1
-        if [[ "${{ runner.os }}" == "Linux" ]]; then
-          CORES=$(nproc)
-        elif [[ "${{ runner.os }}" == "Windows" ]]; then
-          CORES=$((($((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors)+1)/2)) # Powershell to get physical cores roughly
-        elif [[ "${{ runner.os }}" == "macOS" ]]; then
-           CORES=$(sysctl -n hw.ncpu)
-        fi
-        # Fallback if detection failed
-        if ! [[ "$CORES" =~ ^[0-9]+$ ]] || [[ "$CORES" -lt 1 ]]; then
-            CORES=1
-        fi
-        echo "Using ${CORES} cores for building..."
+    # - name: Build Project Target
+    #   run: |
+    #     echo "Building project target '${{ env.EXECUTABLE_NAME }}' on ${{ runner.os }}..."
+    #     # --- Determine Cores ---
+    #     CORES=1
+    #     if [[ "${{ runner.os }}" == "Linux" ]]; then
+    #       CORES=$(nproc)
+    #     elif [[ "${{ runner.os }}" == "Windows" ]]; then
+    #       CORES=$((($((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors)+1)/2)) # Powershell to get physical cores roughly
+    #     elif [[ "${{ runner.os }}" == "macOS" ]]; then
+    #        CORES=$(sysctl -n hw.ncpu)
+    #     fi
+    #     # Fallback if detection failed
+    #     if ! [[ "$CORES" =~ ^[0-9]+$ ]] || [[ "$CORES" -lt 1 ]]; then
+    #         CORES=1
+    #     fi
+    #     echo "Using ${CORES} cores for building..."
 
-        # --- Build using CMake ---
-        # Build only the specific target with the Release configuration
-        cmake --build build --target ${{ env.EXECUTABLE_NAME }} --preset ninja-vcpkg-release --parallel ${CORES}
-      shell: bash
+    #     # --- Build using CMake ---
+    #     # Build only the specific target with the Release configuration
+    #     cmake --build build --target ${{ env.EXECUTABLE_NAME }} --preset ninja-vcpkg-release --parallel ${CORES}
+    #   shell: bash
 
     # 10. Package Specific Artifacts (Executable + SO/DLLs) (From Build Project workflow)
     #     Adjust paths based on CMake generator output (build/ for Makefiles, build/Release/ for MSVC)
