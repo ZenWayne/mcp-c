@@ -17,6 +17,7 @@ env:
   VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg/bincache
   # Enable vcpkg binary caching via GitHub Actions Cache
   VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+  VCPKG_JSON: ${{ github.workspace }}/vcpkg.json
 
   # --- Vars from Build Project workflow ---
   # Define the base executable name
@@ -75,6 +76,11 @@ jobs:
     # 5. Get CMake (from hosted-pure-workflow) - Installs CMake, Ninja not used later
     - name: Install/Cache CMake
       uses: lukka/get-cmake@latest
+
+    - name: Restore from cache and setup vcpkg executable and data files.
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
 
     # 6. Cache vcpkg installation itself (not packages) (from hosted-pure-workflow)
     - name: Cache vcpkg installation and downloads
