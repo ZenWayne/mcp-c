@@ -92,6 +92,7 @@ jobs:
         buildPresetAdditionalArgs: "['--config Release']"
         testPreset: 'ninja-multi-vcpkg'
         testPresetAdditionalArgs: "['--config Release']"
+        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
 
     # 6. Cache vcpkg installation itself (not packages) (from hosted-pure-workflow)
     - name: Cache vcpkg installation and downloads
