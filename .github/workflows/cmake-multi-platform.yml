@@ -82,9 +82,6 @@ jobs:
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
-        runVcpkgInstall: true
-        run: |
-          vcpkg install ${{ env.VCPKG_PACKAGES }} --triplet ${{ matrix.vcpkg_triplet }}
 
     - name: Run CMake consuming CMakePreset.json and run vcpkg to build packages
       uses: lukka/run-cmake@v10
