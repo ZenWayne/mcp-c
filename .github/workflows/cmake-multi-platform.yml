@@ -60,12 +60,17 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: true
-        fetch-depth: 0 # Keep fetch-depth from original build workflow just in case
 
     # 3. Create Binary Cache Directory (from hosted-pure-workflow)
-    - name: Create vcpkg binary cache directory
+    - name: Create vcpkg binary cache directory (Linux)
+      if: runner.os == 'Linux'
       run: mkdir -p ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
       shell: bash
+
+    - name: Create vcpkg binary cache directory (Windows)
+      if: runner.os == 'Windows'
+      run: New-Item -ItemType Directory -Force -Path "${{ env.VCPKG_DEFAULT_BINARY_CACHE }}"
+      shell: powershell # Use native powershell on Windows
 
     # 4. Install Base Build Tools (Linux Only) (from Build Project workflow)
     - name: Install build dependencies (Linux)
