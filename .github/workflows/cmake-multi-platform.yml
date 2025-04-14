@@ -78,41 +78,28 @@ jobs:
     - name: Install/Cache CMake
       uses: lukka/get-cmake@latest
 
-    - name: Restore from cache and setup vcpkg executable and data files.
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
-
-    - name: Run CMake consuming CMakePreset.json and run vcpkg to build packages
-      uses: lukka/run-cmake@v10
-      with:
-        configurePreset: 'ninja-multi-vcpkg'
-        configurePresetAdditionalArgs: "['-DVCPKG_APPLOCAL_DEPS=ON']"
-        buildPreset: 'ninja-multi-vcpkg'
-        buildPresetAdditionalArgs: "['--config Release']"
-        testPreset: 'ninja-multi-vcpkg'
-        testPresetAdditionalArgs: "['--config Release']"
-        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
-
-    # 6. Cache vcpkg installation itself (not packages) (from hosted-pure-workflow)
-    - name: Cache vcpkg installation and downloads
+    # Restore vcpkg from the GitHub Action cache service. Note that packages are restored by vcpkg's binary caching
+    # when it is being run afterwards by CMake.
+    - name: Restore vcpkg
       uses: actions/cache@v4
       with:
+        # The first path is the location of vcpkg: it contains the vcpkg executable and data files, as long as the
+        # built package archives (aka binary cache) which are located by VCPKG_DEFAULT_BINARY_CACHE env var.
+        # The other paths starting with '!' are exclusions: they contain termporary files generated during the build of the installed packages.
         path: |
           ${{ env._VCPKG_ }}
           !${{ env._VCPKG_ }}/buildtrees
           !${{ env._VCPKG_ }}/packages
-          !${{ env._VCPKG_ }}/downloads # Downloads will be cached by binary caching if possible
+          !${{ env._VCPKG_ }}/downloads
           !${{ env._VCPKG_ }}/installed
-        # Use submodule HEAD for cache key
-        key: vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-${{ hashFiles( '.git/modules/vcpkg/HEAD' )}}
-        restore-keys: |
-           vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-
+        # The key is composed in a way that it gets properly invalidated whenever a different version of vcpkg is being used.
+        key: |
+          ${{ hashFiles( '.git/modules/vcpkg/HEAD' )}}
 
-    # 7. Setup MSVC Developer Command Prompt (Windows Only) (from hosted-pure-workflow)
-    - name: Setup MSVC Developer Command Prompt
-      if: runner.os == 'Windows'
-      uses: ilammy/msvc-dev-cmd@v1
+    - uses: ilammy/msvc-dev-cmd@v1
+    - name: Restore from cache the dependencies and generate project files
+      run: |
+        cmake --workflow --preset ninja-vcpkg-release -DVCPKG_APPLOCAL_DEPS=ON
 
     # 8. Configure Project with CMake (Adapted from Build Project workflow, using submodule paths)
     #    This step implicitly runs vcpkg install via the toolchain file, leveraging binary caching.
