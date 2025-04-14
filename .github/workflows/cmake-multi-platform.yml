@@ -99,7 +99,7 @@ jobs:
     - uses: ilammy/msvc-dev-cmd@v1
     - name: Restore from cache the dependencies and generate project files
       run: |
-        cmake --workflow --preset ninja-vcpkg-release -DVCPKG_APPLOCAL_DEPS=ON
+        cmake --workflow --preset ninja-vcpkg-release
 
     # 8. Configure Project with CMake (Adapted from Build Project workflow, using submodule paths)
     #    This step implicitly runs vcpkg install via the toolchain file, leveraging binary caching.

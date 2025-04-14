@@ -12,7 +12,10 @@
             "description": "Configure with vcpkg toolchain and generate Ninja project files for all configurations",
             "binaryDir": "${sourceDir}/builds/${presetName}",
             "generator": "Ninja Multi-Config",
-            "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake"
+            "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
+            "cacheVariables": {
+                "VCPKG_APPLOCAL_DEPS": "ON"
+            }
         }
     ],
     "buildPresets": [
