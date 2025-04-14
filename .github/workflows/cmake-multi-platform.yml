@@ -82,8 +82,19 @@ jobs:
       uses: lukka/run-vcpkg@v11
       with:
         vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
+        runVcpkgInstall: true
         run: |
           vcpkg install ${{ env.VCPKG_PACKAGES }} --triplet ${{ matrix.vcpkg_triplet }}
+
+    - name: Run CMake consuming CMakePreset.json and run vcpkg to build packages
+      uses: lukka/run-cmake@v10
+      with:
+        configurePreset: 'ninja-multi-vcpkg'
+        configurePresetAdditionalArgs: "['-DVCPKG_APPLOCAL_DEPS=ON']"
+        buildPreset: 'ninja-multi-vcpkg'
+        buildPresetAdditionalArgs: "['--config Release']"
+        testPreset: 'ninja-multi-vcpkg'
+        testPresetAdditionalArgs: "['--config Release']"
 
     # 6. Cache vcpkg installation itself (not packages) (from hosted-pure-workflow)
     - name: Cache vcpkg installation and downloads
