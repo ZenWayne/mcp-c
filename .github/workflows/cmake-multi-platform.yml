@@ -1,163 +1,250 @@
-name: Build Project with vcpkg (Clang/LLVM, cJSON) - No Ninja - Selective Archive
+name: Build Project (Submodule, Caching, Clang, No Ninja)
 
 on:
   push:
-    branches: [ "main" ] # Adjust branches as needed
+    branches: [ "main", "v11" ] # From hosted-pure-workflow
   pull_request:
-    branches: [ "main" ] # Adjust branches as needed
+    branches: [ "main", "v11" ] # From hosted-pure-workflow
+  workflow_dispatch: # From hosted-pure-workflow
+  schedule: # From hosted-pure-workflow
+    - cron: '0 1 * * *'
 
 env:
-  VCPKG_JSON: ".github/workflows/vcpkg.json"
-  VCPKG_ROOT: ${{ github.workspace }}/vcpkg
-  VCPKG_PACKAGES: "cjson llvm clang"
-  EXECUTABLE_NAME: "export" # Define the base executable name
+  # --- Vars from hosted-pure-workflow ---
+  # Location of vcpkg submodule
+  _VCPKG_: ${{ github.workspace }}/vcpkg
+  # Location for vcpkg binary cache
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg/bincache
+  # Enable vcpkg binary caching via GitHub Actions Cache
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+  # --- Vars from Build Project workflow ---
+  # Define the base executable name
+  EXECUTABLE_NAME: "export"
+  # Define the source directory containing the CMakeLists.txt for the main project
+  SOURCE_DIR: "export" # Assuming your source code and CMakeLists.txt are in an 'export' subdirectory
 
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        include:
-          - os: ubuntu-latest
-            vcpkg_triplet: x64-linux
-          - os: windows-latest
-            vcpkg_triplet: x64-windows
-      fail-fast: false
-
+    # Use more specific OS versions from hosted-pure-workflow
+    name: ${{ matrix.os }}-${{ github.workflow }}
     runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Use specific OS versions from hosted-pure-workflow
+        os: [ubuntu-24.04, windows-2022] # Removed macos-15 as it wasn't in the original build workflow, add back if needed
+        include:
+          # Define triplets explicitly like in the original build workflow
+          - os: ubuntu-24.04
+            vcpkg_triplet: x64-linux
+          - os: windows-2022
+            vcpkg_triplet: x64-windows
+          # Add macOS triplet if you add macos-15 back to the OS list
+          # - os: macos-15
+          #   vcpkg_triplet: x64-osx # or arm64-osx depending on your target
 
     steps:
+    # 1. Setup GHA Cache for vcpkg Binary Caching (from hosted-pure-workflow)
+    - name: Export GHA cache environment variables
+      uses: actions/github-script@v7
+      with:
+        script: |
+          core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+    # 2. Checkout Repository with Submodules (from hosted-pure-workflow)
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0
+        submodules: true
+        fetch-depth: 0 # Keep fetch-depth from original build workflow just in case
 
-    # 1. Install Base Build Tools (Linux Only)
+    # 3. Create Binary Cache Directory (from hosted-pure-workflow)
+    - name: Create vcpkg binary cache directory
+      run: mkdir -p ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+      shell: bash
+
+    # 4. Install Base Build Tools (Linux Only) (from Build Project workflow)
     - name: Install build dependencies (Linux)
       if: runner.os == 'Linux'
       run: |
         sudo apt-get update -y
         sudo apt-get install -y build-essential cmake git curl zip unzip tar pkg-config
 
-    # 2. Setup vcpkg, Cache, and Install Dependencies
-    - name: Setup vcpkg
-      uses: lukka/run-vcpkg@v11
-      with:
-        vcpkgDirectory: ${{ env.VCPKG_ROOT }}
-        vcpkgJsonGlob: ${{ env.VCPKG_JSON }}
-        runVcpkgInstall: false
+    # 5. Get CMake (from hosted-pure-workflow) - Installs CMake, Ninja not used later
+    - name: Install/Cache CMake
+      uses: lukka/get-cmake@latest
 
-    - name: Cache vcpkg artifacts
+    # 6. Cache vcpkg installation itself (not packages) (from hosted-pure-workflow)
+    - name: Cache vcpkg installation and downloads
       uses: actions/cache@v4
-      id: cache-vcpkg
       with:
-        path: ${{ env.VCPKG_ROOT }}
-        key: ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-vcpkg-${{ hashFiles(env.VCPKG_PACKAGES) }}
+        path: |
+          ${{ env._VCPKG_ }}
+          !${{ env._VCPKG_ }}/buildtrees
+          !${{ env._VCPKG_ }}/packages
+          !${{ env._VCPKG_ }}/downloads # Downloads will be cached by binary caching if possible
+          !${{ env._VCPKG_ }}/installed
+        # Use submodule HEAD for cache key
+        key: vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-${{ hashFiles( '.git/modules/vcpkg/HEAD' )}}
         restore-keys: |
-          ${{ runner.os }}-${{ matrix.vcpkg_triplet }}-vcpkg-
+           vcpkg-${{ runner.os }}-${{ matrix.vcpkg_triplet }}-
 
-    - name: Install vcpkg dependencies
-      run: |
-        echo "Installing packages: ${{ env.VCPKG_PACKAGES }} for triplet ${{ matrix.vcpkg_triplet }}"
-        ${{ env.VCPKG_ROOT }}/vcpkg install ${{ env.VCPKG_PACKAGES }} --triplet ${{ matrix.vcpkg_triplet }}
-      shell: bash
+    # 7. Setup MSVC Developer Command Prompt (Windows Only) (from hosted-pure-workflow)
+    - name: Setup MSVC Developer Command Prompt
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
 
-    # 3. Configure Project with CMake (Default Generator)
-    - name: Configure Project with CMake
+    # 8. Configure Project with CMake (Adapted from Build Project workflow, using submodule paths)
+    #    This step implicitly runs vcpkg install via the toolchain file, leveraging binary caching.
+    - name: Configure Project with CMake (using Clang, default generator)
       run: |
-        # Set compilers
+        # --- Set Clang Compilers (Logic from Build Project workflow, adapted paths) ---
+        echo "Setting up Clang compilers..."
         if [[ "${{ runner.os }}" == "Linux" ]]; then
-          export CC="${{ env.VCPKG_ROOT }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang"
-          export CXX="${{ env.VCPKG_ROOT }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang++"
+          CLANG_PATH="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang"
+          CLANGPP_PATH="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/clang/clang++"
+          if [[ ! -f "$CLANG_PATH" ]] || [[ ! -f "$CLANGPP_PATH" ]]; then
+             echo "::error::Clang compiler not found after vcpkg install via CMake. Check vcpkg.json includes 'clang' and 'llvm'."
+             # Try bootstrapping vcpkg manually just in case toolchain didn't run install yet
+             # pushd ${{ env._VCPKG_ }} && ./bootstrap-vcpkg.sh && popd
+             # ${{ env._VCPKG_ }}/vcpkg install clang llvm --triplet ${{ matrix.vcpkg_triplet }}
+             # Recheck paths... if still not found, then exit.
+             if [[ ! -f "$CLANG_PATH" ]] || [[ ! -f "$CLANGPP_PATH" ]]; then exit 1; fi
+          fi
+          export CC="$CLANG_PATH"
+          export CXX="$CLANGPP_PATH"
+          echo "CC=$CC"
+          echo "CXX=$CXX"
         elif [[ "${{ runner.os }}" == "Windows" ]]; then
-          CLANG_CL_PATH="${{ env.VCPKG_ROOT }}/installed/${{ matrix.vcpkg_triplet }}/tools/llvm/clang-cl.exe"
-          CLANG_CL_PATH_WIN=$(cygpath -w "${CLANG_CL_PATH}")
+          CLANG_CL_PATH_NIX="${{ env._VCPKG_ }}/installed/${{ matrix.vcpkg_triplet }}/tools/llvm/clang-cl.exe"
+          if [[ ! -f "$CLANG_CL_PATH_NIX" ]]; then
+             echo "::error::Clang-cl compiler not found after vcpkg install via CMake. Check vcpkg.json includes 'clang' and 'llvm'."
+             # pushd ${{ env._VCPKG_ }} && .\bootstrap-vcpkg.bat && popd
+             # ${{ env._VCPKG_ }}/vcpkg install clang llvm --triplet ${{ matrix.vcpkg_triplet }}
+             if [[ ! -f "$CLANG_CL_PATH_NIX" ]]; then exit 1; fi
+          fi
+          CLANG_CL_PATH_WIN=$(cygpath -w "${CLANG_CL_PATH_NIX}")
           export CC="${CLANG_CL_PATH_WIN}"
           export CXX="${CLANG_CL_PATH_WIN}"
+          echo "CC=$CC"
+          echo "CXX=$CXX"
         fi
-        # Check compilers (omitted for brevity, same as before)
+        echo "Verifying compilers:"
+        "$CC" --version
+        "$CXX" --version
 
-        # Configure CMake
-        VCPKG_TOOLCHAIN_FILE="${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake"
+        # --- Configure CMake (Command from Build Project workflow, adapted paths) ---
+        VCPKG_TOOLCHAIN_FILE_NIX="${{ env._VCPKG_ }}/scripts/buildsystems/vcpkg.cmake"
         if [[ "${{ runner.os }}" == "Windows" ]]; then
-            VCPKG_TOOLCHAIN_FILE=$(cygpath -w "${VCPKG_TOOLCHAIN_FILE}")
+            VCPKG_TOOLCHAIN_FILE=$(cygpath -w "${VCPKG_TOOLCHAIN_FILE_NIX}")
+        else
+            VCPKG_TOOLCHAIN_FILE="${VCPKG_TOOLCHAIN_FILE_NIX}"
         fi
 
-        cmake -S export -B build \
+        echo "Using Toolchain File: ${VCPKG_TOOLCHAIN_FILE}"
+        echo "Using Triplet: ${{ matrix.vcpkg_triplet }}"
+        echo "Source Directory: ${{ env.SOURCE_DIR }}"
+
+        # Configure using the default generator (Makefiles/MSVC), not Ninja.
+        # vcpkg dependencies (cjson, llvm, clang) should be listed in vcpkg.json
+        # inside the SOURCE_DIR or project root.
+        cmake -S ${{ env.SOURCE_DIR }} -B build \
           -DCMAKE_TOOLCHAIN_FILE="${VCPKG_TOOLCHAIN_FILE}" \
           -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
-          -DVCPKG_APPLOCAL_DEPS=ON \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_C_COMPILER="$CC" \
           -DCMAKE_CXX_COMPILER="$CXX"
+          # -G "Unix Makefiles" # Explicitly specify generator if needed, usually default is fine
+          # -G "Visual Studio 17 2022" # Or specify VS generator on Windows if needed
       shell: bash
 
-    # 4. Build Project
-    - name: Build Project
+    # 9. Build Project (From Build Project workflow)
+    - name: Build Project Target
       run: |
         echo "Building project target '${{ env.EXECUTABLE_NAME }}' on ${{ runner.os }}..."
-        # Determine cores (omitted for brevity, same as before)
-        CORES=$(...) # Replace with previous core detection logic
+        # --- Determine Cores ---
+        CORES=1
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          CORES=$(nproc)
+        elif [[ "${{ runner.os }}" == "Windows" ]]; then
+          CORES=$((($((Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors)+1)/2)) # Powershell to get physical cores roughly
+        elif [[ "${{ runner.os }}" == "macOS" ]]; then
+           CORES=$(sysctl -n hw.ncpu)
+        fi
+        # Fallback if detection failed
+        if ! [[ "$CORES" =~ ^[0-9]+$ ]] || [[ "$CORES" -lt 1 ]]; then
+            CORES=1
+        fi
         echo "Using ${CORES} cores for building..."
+
+        # --- Build using CMake ---
+        # Build only the specific target with the Release configuration
         cmake --build build --target ${{ env.EXECUTABLE_NAME }} --config Release --parallel ${CORES}
       shell: bash
 
-    # 5. Package Specific Artifacts (Executable + SO/DLLs)
+    # 10. Package Specific Artifacts (Executable + SO/DLLs) (From Build Project workflow)
+    #     Adjust paths based on CMake generator output (build/ for Makefiles, build/Release/ for MSVC)
     - name: Package Artifacts (Linux)
       if: runner.os == 'Linux'
       run: |
-        cd build
-        echo "Packaging executable and .so files from $(pwd)"
-        ls -l # List files for debugging
+        ARTIFACT_DIR="build" # Default for Makefiles
+        ARCHIVE_NAME="../artifact.zip"
+        EXE_PATH="${ARTIFACT_DIR}/${{ env.EXECUTABLE_NAME }}"
 
-        # Check if executable exists
-        if [[ ! -f "${{ env.EXECUTABLE_NAME }}" ]]; then
-          echo "Error: Executable '${{ env.EXECUTABLE_NAME }}' not found in build directory!"
+        echo "Packaging Linux artifacts from ${ARTIFACT_DIR}"
+        ls -l "${ARTIFACT_DIR}" # List files for debugging
+
+        if [[ ! -f "${EXE_PATH}" ]]; then
+          echo "::error::Executable '${EXE_PATH}' not found!"
           exit 1
         fi
 
-        # Find .so files in the current directory (build/)
+        # Find .so files ONLY in the same directory as the executable
+        # Use pushd/popd to make find/zip paths simpler
+        pushd "${ARTIFACT_DIR}"
         so_files=$(find . -maxdepth 1 -name '*.so' -print)
         files_to_archive="${{ env.EXECUTABLE_NAME }}"
 
         if [[ -n "$so_files" ]]; then
-          # Add relative paths of .so files (e.g., ./libexample.so)
-          relative_so_files=$(echo "$so_files" | sed 's|^\./||') # Remove leading ./ if present
+          relative_so_files=$(echo "$so_files" | sed 's|^\./||') # Remove leading ./
           files_to_archive="$files_to_archive $relative_so_files"
           echo "Found .so files: $relative_so_files"
         else
-          echo "No .so files found directly in build directory."
+          echo "No .so files found directly in ${ARTIFACT_DIR}."
         fi
 
         echo "Archiving files: $files_to_archive"
-        zip ../artifact.zip $files_to_archive
-        echo "Created artifact.zip"
-        cd ..
+        zip "${ARCHIVE_NAME}" $files_to_archive
+        popd
+        echo "Created ${ARCHIVE_NAME}"
       shell: bash
 
     - name: Package Artifacts (Windows)
       if: runner.os == 'Windows'
       run: |
-        $BuildDir = "build/Release" # Default output dir for VS generator Release config
+        # Default output dir for single-config MSVC generator is build/Release
+        $BuildDir = "build/Release"
         $ExeName = "${{ env.EXECUTABLE_NAME }}.exe"
         $ExePath = Join-Path $BuildDir $ExeName
-        $ArchiveName = "artifact.zip" # Relative path for output zip
+        $ArchiveName = "artifact.zip" # Relative path for output zip in parent dir
 
-        Write-Host "Looking for artifacts in $BuildDir"
-        # Check if the presumed output directory exists
+        Write-Host "Looking for Windows artifacts in '$BuildDir'"
         if (-not (Test-Path $BuildDir -PathType Container)) {
-          Write-Error "Build output directory not found: $BuildDir"
-          # Optional: Try searching directly in 'build' as a fallback
-          # $BuildDir = "build"
-          # $ExePath = Join-Path $BuildDir $ExeName
-          # if (-not (Test-Path $BuildDir -PathType Container)) { exit 1 }
-          exit 1
-        }
-
-        # Check if executable exists in the target directory
-        if (-not (Test-Path $ExePath)) {
-            Write-Error "Executable not found at $ExePath"
-            Write-Host "Files available in $BuildDir:"
+          Write-Error "Build output directory not found: '$BuildDir'. Listing contents of 'build':"
+          Get-ChildItem -Path build -Recurse -Depth 1 | Select-Object -ExpandProperty FullName
+          # Fallback check if maybe it wasn't a multi-config generator?
+          $BuildDir = "build"
+          $ExePath = Join-Path $BuildDir $ExeName
+          if (-not (Test-Path $ExePath)) {
+            Write-Error "Executable not found in '$BuildDir' either."
+            exit 1
+          }
+          Write-Host "Found executable in fallback directory '$BuildDir'."
+        } elseif (-not (Test-Path $ExePath)) {
+            Write-Error "Executable not found at '$ExePath'"
+            Write-Host "Files available in '$BuildDir':"
             Get-ChildItem -Path $BuildDir | Select-Object -ExpandProperty Name
             exit 1
         }
@@ -168,11 +255,11 @@ jobs:
         $FilesToArchive = @($ExeName) + $DllFiles
 
         if ($FilesToArchive.Count -eq 0) {
-            Write-Error "No files found to archive (exe or dll) in $BuildDir"
+            Write-Error "No files found to archive (expected at least '$ExeName') in '$BuildDir'"
             exit 1
         }
 
-        Write-Host "Archiving the following files from $BuildDir:"
+        Write-Host "Archiving the following files from '$BuildDir':"
         $FilesToArchive | ForEach-Object { Write-Host "- $_" }
 
         # Use Push/Pop-Location to simplify paths for Compress-Archive
@@ -183,9 +270,27 @@ jobs:
         Write-Host "Created $ArchiveName"
       shell: powershell
 
-    # 6. Upload Artifact
+    # 11. Upload Artifact (From Build Project workflow)
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
         name: build-artifact-${{ runner.os }}-${{ matrix.vcpkg_triplet }}
-        path: artifact.zip # Zipped archive containing exe/dll/so
+        path: artifact.zip # Path relative to workspace root
+
+    # --- Optional Steps from hosted-pure-workflow (Need Adaptation) ---
+    # These used presets, which we removed. To add them back:
+    # 1. Define corresponding CMake targets (e.g., 'check-format', 'test').
+    # 2. Call them using `cmake --build build --target <target_name>` or `ctest --test-dir build ...`
+
+    # - name: check-format (Adapt if needed)
+    #   if: runner.os == 'Linux'
+    #   run: |
+    #     echo "Skipping format check (requires preset adaptation or specific CMake target)"
+    #     # Example if you have a 'check-format' target:
+    #     # cmake --build build --target check-format
+
+    # - name: Test (Adapt if needed)
+    #   run: |
+    #     echo "Skipping tests (requires preset adaptation or ctest setup)"
+    #     # Example using ctest directly:
+    #     # ctest --test-dir build --output-on-failure -C Release
