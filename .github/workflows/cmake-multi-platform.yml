@@ -110,7 +110,8 @@ jobs:
     # store the built packages artifacts.
     - name: Restore from cache the dependencies and generate project files
       run: |
-        cmake --preset ninja-multi-vcpkg
+        cmake --preset ninja-multi-vcpkg  -j $(nproc)
+      shell: bash
       
     - name: Build (Release configuration)
       run: |

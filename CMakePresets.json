@@ -16,9 +16,31 @@
             "cacheVariables": {
                 "VCPKG_APPLOCAL_DEPS": "ON"
             }
+        },
+        {
+            "name": "ninja-multi-local",
+            "displayName": "Ninja Multi-Config",
+            "description": "Configure with vcpkg toolchain and generate Ninja project files for all configurations",
+            "generator": "Ninja Multi-Config",
+            "toolchainFile": "E:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake",
+            "binaryDir": "${sourceDir}/builds/${presetName}",
+            "cacheVariables": {
+                "VCPKG_APPLOCAL_DEPS": "ON",
+                "CMAKE_MAKE_PROGRAM": "E:\\vcpkg\\installed\\x64-windows\\tools\\ninja\\ninja.exe",
+                "CMAKE_TOOLCHAIN_FILE": "$env{toolchainFile}",
+                "CMAKE_PREFIX_PATH": "E:\\vcpkg\\installed\\x64-windows",
+                "VCPKG_MANIFEST_INSTALL": "OFF"
+            }
         }
     ],
     "buildPresets": [
+        {
+            "name": "ninja-vcpkg-local",
+            "configurePreset": "ninja-multi-local",
+            "displayName": "Build (Local)",
+            "description": "Build with Ninja/vcpkg (Local)",
+            "configuration": "Release"
+        },
         {
             "name": "ninja-vcpkg-debug",
             "configurePreset": "ninja-multi-vcpkg",
