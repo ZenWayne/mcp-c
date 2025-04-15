@@ -23,6 +23,7 @@ file(GLOB_RECURSE SOURCE_NEED_TO_BE_GENERATED
 # 排除不需要的文件
 file(GLOB_RECURSE EXCLUDED_FILES
     ${PROJECT_SOURCE_DIR}/src/base/mcp.c
+    ${PROJECT_SOURCE_DIR}/src/generated_src/*
     # 移除对 base 目录的排除
 )
 list(REMOVE_ITEM SOURCE_NEED_TO_BE_GENERATED ${EXCLUDED_FILES})
@@ -46,7 +47,7 @@ foreach(source_file ${SOURCE_NEED_TO_BE_GENERATED})
     add_custom_command(
         OUTPUT ${generated_file}
         COMMAND ${CMAKE_COMMAND} -E touch ${generated_file}
-        DEPENDS ${source_file}
+        DEPENDS ${SOURCE_NEED_TO_BE_GENERATED}
         VERBATIM # Important for proper dependency tracking
     )
 endforeach()

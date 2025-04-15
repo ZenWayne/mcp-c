@@ -5,7 +5,17 @@
       "kind": "filesystem",
       "baseline": "default",
       "path": "E:\\vcpkg"
-    }
+    },
+    "registry": [
+      {
+        "kind": "git",
+        "repository": "https://github.com/microsoft/vcpkg-tool",
+        "baseline": "c167d3e0076fe8e4b265e6c57eb0b4776cf6e12d",
+        "packages": [
+          "llvm","cjson"
+        ]
+      }
+    ]
   },
   "name": "mcp-c",
   "version-string": "0.1.0",

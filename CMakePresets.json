@@ -25,11 +25,12 @@
             "toolchainFile": "E:\\vcpkg\\scripts\\buildsystems\\vcpkg.cmake",
             "binaryDir": "${sourceDir}/builds/${presetName}",
             "cacheVariables": {
-                "VCPKG_APPLOCAL_DEPS": "ON",
+                "VCPKG_INSTALLED_DIR": "E:\\vcpkg\\installed\\",
+                "VCPKG_TARGET_TRIPLET": "x64-windows",
                 "CMAKE_MAKE_PROGRAM": "E:\\vcpkg\\installed\\x64-windows\\tools\\ninja\\ninja.exe",
                 "CMAKE_TOOLCHAIN_FILE": "$env{toolchainFile}",
-                "CMAKE_PREFIX_PATH": "E:\\vcpkg\\installed\\x64-windows",
-                "VCPKG_MANIFEST_INSTALL": "OFF"
+                "VCPKG_MANIFEST_INSTALL": "OFF",
+                "VCPKG_APPLOCAL_DEPS": "ON"
             }
         }
     ],
