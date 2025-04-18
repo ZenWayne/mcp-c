@@ -4,7 +4,11 @@
   "version-string": "0.1.0",
   "dependencies": [
     "cjson",
-    "llvm"
+    {
+      "name": "llvm",
+      "default-features": false,
+      "features": ["clang", "target-x86"]
+    }
   ],
   "builtin-baseline": "c167d3e0076fe8e4b265e6c57eb0b4776cf6e12d"
 }
