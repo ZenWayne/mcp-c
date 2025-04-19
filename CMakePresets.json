@@ -15,7 +15,8 @@
             "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
             "cacheVariables": {
                 "VCPKG_APPLOCAL_DEPS": "ON",
-                "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=C:\\vcpkg\\buildtrees"
+                "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=C:\\vcpkg\\buildtrees",
+                "VCPKG_BUILD_TYPE": "release"
             }
         },
         {
