@@ -31,11 +31,11 @@ cJSON* initialize(char* protocolVersion, struct capabilities* capabilities, stru
         return NULL;
     }
 
-    fprintf(stderr, "protocolVersion: %s\n", protocolVersion);
-    fprintf(stderr, "capabilities.roots.listChanged: %d\n", capabilities->roots.listChanged);
-    fprintf(stderr, "capabilities.sampling.maxTokens: %d\n", capabilities->sampling.maxTokens);
-    fprintf(stderr, "clientInfo.name: %s\n", clientInfo->name);
-    fprintf(stderr, "clientInfo.version: %s\n", clientInfo->version);
+    // fprintf(stderr, "protocolVersion: %s\n", protocolVersion);
+    // fprintf(stderr, "capabilities.roots.listChanged: %d\n", capabilities->roots.listChanged);
+    // fprintf(stderr, "capabilities.sampling.maxTokens: %d\n", capabilities->sampling.maxTokens);
+    // fprintf(stderr, "clientInfo.name: %s\n", clientInfo->name);
+    // fprintf(stderr, "clientInfo.version: %s\n", clientInfo->version);
 
     // 添加serverInfo
     cJSON* serverInfo = cJSON_CreateObject();
@@ -46,7 +46,12 @@ cJSON* initialize(char* protocolVersion, struct capabilities* capabilities, stru
     cJSON_AddItemToObject(result, "serverInfo", serverInfo);
     cJSON_AddStringToObject(serverInfo, "name", SERVER_NAME);
     cJSON_AddStringToObject(serverInfo, "version", SERVER_VERSION);
-    int i=0;
+    cJSON_AddStringToObject(result, "protocolVersion", protocolVersion);//PROTOCOL_VERSION);
+    cJSON *caps = cJSON_CreateObject();
+    cJSON *tools = cJSON_CreateObject();
+    cJSON_AddBoolToObject(tools, "listChanged", 0);
+    cJSON_AddItemToObject(caps, "tools", tools);
+    cJSON_AddItemToObject(result, "capabilities", caps);
     return result;
 }
 
@@ -62,7 +67,7 @@ cJSON* initialize(char* protocolVersion, struct capabilities* capabilities, stru
 EXPORT_AS(notifications, initialized)
 cJSON* initialized_notification() {
     // 这里可以添加初始化完成后的处理逻辑
-    printf("Server initialized successfully\n");
+    //printf("Server initialized successfully\n");
     cJSON* result = cJSON_CreateObject();
     return result;
 }

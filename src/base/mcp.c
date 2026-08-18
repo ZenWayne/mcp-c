@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <string.h>
 #include "export_macro.h"
 #include "mcp.h"
 #include "generated_func.h"
@@ -16,9 +17,10 @@ int mcp_serve() {
     
     // Read data from standard input
     if (fgets(buffer, sizeof(buffer), stdin) == NULL) {
-        fprintf(stderr, "Error reading from stdin\n");
+        //fprintf(stderr, "Error reading from stdin\n");
         return -1;
     }
+    //fprintf(stderr, "Got: %s", buffer);
     
     // Parse JSON data
     json = cJSON_Parse(buffer);
@@ -33,6 +35,12 @@ int mcp_serve() {
     // Get request ID
     id = cJSON_GetObjectItemCaseSensitive(json, "id");
     if (id == NULL || !cJSON_IsNumber(id)) {
+        cJSON *method = cJSON_GetObjectItemCaseSensitive(json, "method");
+        //fprintf(stderr, "Got: %s\n", method->valuestring);
+        if (!strncmp(method->valuestring, "notifications/", strlen("notifications/"))) {
+            //fprintf(stderr, "Ignoring missing ID for: %s\n", method->valuestring);
+            return 1;
+        }
         fprintf(stderr, "Invalid or missing request ID\n");
         cJSON_Delete(json);
         return -1;
@@ -40,6 +48,11 @@ int mcp_serve() {
 
     // Process JSON data here
     cJSON* response = cJSON_CreateObject();
+    
+    // Add jsonrpc version
+    cJSON_AddStringToObject(response, "jsonrpc", "2.0");
+    // Add ID to response
+    cJSON_AddNumberToObject(response, "id", id->valueint);
     result = bridge(json);
     if (result != NULL) {
         if (response != NULL) {
@@ -47,14 +60,12 @@ int mcp_serve() {
             cJSON_AddItemToObject(response, "result", result);
         }
     }else{
-        cJSON_AddStringToObject(response, "result", cJSON_CreateObject());
-        printf("result is NULL\n");
+        cJSON_AddItemToObject(response, "result", cJSON_CreateObject());
+        fprintf(stderr, "result is NULL\n");
     }
-    // Add ID to response
-    cJSON_AddNumberToObject(response, "id", id->valueint);
-    // Add jsonrpc version
-    cJSON_AddStringToObject(response, "jsonrpc", "2.0");
-    printf("%s\n", cJSON_Print(response));
+    //fprintf(stderr, "Replying with: %s\n", cJSON_PrintUnformatted(response));
+    printf("%s\n", cJSON_PrintUnformatted(response));
+    fflush(stdout);
     // Clean up resources
     cJSON_Delete(json);
     cJSON_Delete(response);

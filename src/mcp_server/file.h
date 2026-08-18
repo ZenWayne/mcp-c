@@ -8,25 +8,14 @@
 extern "C" {
 #endif
 
-typedef enum EXPORT COLOR {
-    RED,
-    GREEN,
-    BLUE
-} COLOR;
+typedef struct EXPORT_AS(obj) obj {
+    int placeholder;
+} obj;
 
-typedef struct EXPORT_AS(cloth) cloth {
-    enum COLOR color DES("color of the cloth");
-    int size;
-} cloth;
+cJSON *get_flag(char *auth_token DES("Authentication token")) DES("Returns a flag for authenticated users");
 
-typedef struct EXPORT person {
-    bool isMale DES("whether is male or not male is true");
-    int age DES("age of the person");
-    char* name;
-    cloth wearing_cloths;
-} person;
+cJSON *get_scores() DES("Returns the current scores");
 
-cJSON* get_person_info(person* p);
 #ifdef __cplusplus
 }
 #endif

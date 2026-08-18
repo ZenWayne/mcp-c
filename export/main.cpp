@@ -679,7 +679,7 @@ void generateEnumParser(raw_fd_ostream &cOS, raw_fd_ostream &hOS, const Persiste
     std::string funcName = "parse_" + enumDef.exportName;
     // Declaration in Header
     hOS << "// Parser for enum " << enumDef.exportName << " (" << enumDef.originalName << ")\n";
-    hOS << enumDef.originalName << " " << funcName << "(cJSON *json);\n\n";
+    hOS << "static inline " << enumDef.originalName << " " << funcName << "(cJSON *json);\n\n";
 
     // Definition in C file
     cOS << "// Parser for enum " << enumDef.exportName << " (" << enumDef.originalName << ")\n";
@@ -777,7 +777,7 @@ void generateFieldParserLogic(raw_fd_ostream &cOS, const PersistentFieldInfo& fi
          bool isArray = StringRef(field.typeName).contains('[');
           cOS << "            if (cJSON_IsString(" << field.name << "_json)) {\n";
           if (isPointer) {
-               cOS << "                " << cVar << " = _strdup(" << field.name << "_json->valuestring);\n";
+               cOS << "                " << cVar << " = strdup(" << field.name << "_json->valuestring);\n";
                cOS << "                // TODO: Remember to free this string (" << field.name << ") later!\n";
           } else if (isArray) {
                 cOS << "                strncpy(" << cVar << ", " << field.name << "_json->valuestring, sizeof(" << cVar << ") - 1);\n";
@@ -924,7 +924,7 @@ void generateFunctionHandler(raw_fd_ostream &cOS, raw_fd_ostream &hOS, const Per
              }
         } else if (schema.type == "string" && StringRef(param.typeName).contains('*')) { // Only handle char* for params easily
              cOS << "            if (cJSON_IsString(p_json)) {\n";
-             cOS << "                " << cVar << " = _strdup(p_json->valuestring);\n";
+             cOS << "                " << cVar << " = strdup(p_json->valuestring);\n";
              allocated_params.push_back(cVar); // Mark for freeing
              cOS << "            } else { fprintf(stderr, \"Warning: Expected string for param '" << param.name << "'\\n\"); }\n";
         } else if (schema.type == "integer") {
@@ -1277,6 +1277,12 @@ private:
         sigOS << "    if (!tools) { fprintf(stderr, \"Failed to create tools array\\n\"); cJSON_Delete(root); return NULL; }\n\n";
 
         for (const auto& [exportName, funcDef] : g_persistentFunctions) {
+            if (funcDef.exportName == "initialize")
+                continue;
+            if (funcDef.exportName == "tools/list")
+                continue;
+            if (funcDef.exportName == "notifications/initialized")
+                continue;
             sigOS << "    // Tool for function: " << funcDef.exportName << "\n";
             sigOS << "    {\n";
             sigOS << "        cJSON* tool = cJSON_CreateObject();\n";
@@ -1384,8 +1390,16 @@ private:
          bridgeOS << "    bool params_allocated = (!params_item || !cJSON_IsObject(params_item)); // Track if we allocated it\n\n";
 
 
-        bridgeOS << "    const char* func_name = method_item->valuestring;\n";
+        bridgeOS << "    char* func_name = method_item->valuestring;\n";
         bridgeOS << "    cJSON* result = NULL;\n\n";
+
+        bridgeOS << "    if (strcmp(func_name, \"tools/call\") == 0) {\n";
+        bridgeOS << "        cJSON *np = cJSON_GetObjectItemCaseSensitive(params_obj, \"arguments\");\n";
+        bridgeOS << "        (params_item && cJSON_IsObject(np)) ? np : cJSON_CreateObject(); \n";
+        bridgeOS << "        cJSON *name = cJSON_GetObjectItemCaseSensitive(params_obj, \"name\");\n";
+        bridgeOS << "        func_name = name->valuestring;\n";
+        bridgeOS << "        params_obj = np;\n";
+        bridgeOS << "    }\n\n";
 
         // --- Function Dispatch ---
         bridgeOS << "    bool handled = false;\n";

@@ -7,8 +7,10 @@ extern "C" {
 #endif
 
 int main() {
-    printf("mcp server is running...\n");
-    mcp_serve();
+    //printf("mcp server is running...\n");
+    int ret = 2;
+    while(ret >= 0)
+        ret = mcp_serve();
     return 0;
 }
 

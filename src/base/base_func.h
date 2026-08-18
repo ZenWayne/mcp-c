@@ -4,9 +4,9 @@
 
 #include "export_macro.h"
 // --- Server Information (Constants) ---
-#define SERVER_NAME "secure-filesystem-server" // Server name
+#define SERVER_NAME "mcp-c" // Server name
 #define SERVER_VERSION "0.2.0"                 // Server version
-#define PROTOCOL_VERSION "2024-11-05"          // Protocol version from example
+#define PROTOCOL_VERSION "2025-11-25"          // Protocol version from example
 
 typedef struct EXPORT client_info {
     char* name;
