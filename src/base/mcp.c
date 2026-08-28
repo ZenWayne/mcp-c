@@ -37,7 +37,7 @@ int mcp_serve() {
     if (id == NULL || !cJSON_IsNumber(id)) {
         cJSON *method = cJSON_GetObjectItemCaseSensitive(json, "method");
         //fprintf(stderr, "Got: %s\n", method->valuestring);
-        if (!strncmp(method->valuestring, "notifications/", strlen("notifications/"))) {
+        if (method && method->valuestring && !strncmp(method->valuestring, "notifications/", strlen("notifications/"))) {
             //fprintf(stderr, "Ignoring missing ID for: %s\n", method->valuestring);
             return 1;
         }
