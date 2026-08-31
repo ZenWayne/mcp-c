@@ -1395,8 +1395,9 @@ private:
 
         bridgeOS << "    if (strcmp(func_name, \"tools/call\") == 0) {\n";
         bridgeOS << "        cJSON *np = cJSON_GetObjectItemCaseSensitive(params_obj, \"arguments\");\n";
-        bridgeOS << "        (params_item && cJSON_IsObject(np)) ? np : cJSON_CreateObject(); \n";
+        bridgeOS << "        if (!np) np = cJSON_CreateObject(); \n";
         bridgeOS << "        cJSON *name = cJSON_GetObjectItemCaseSensitive(params_obj, \"name\");\n";
+        bridgeOS << "        if (!name || !cJSON_IsString(name)) return NULL;\n";
         bridgeOS << "        func_name = name->valuestring;\n";
         bridgeOS << "        params_obj = np;\n";
         bridgeOS << "    }\n\n";
